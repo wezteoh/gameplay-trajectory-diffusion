@@ -1,0 +1,58 @@
+defaults:
+  - data: trajectory_nba
+  - model: trajectory_ddpm_moflow
+  - _self_
+
+seed: 42
+
+hardware:
+  use_gpu: true
+  gpu_devices: 1
+
+wandb:
+  enabled: true
+  project: trajectory-ddpm
+  entity: null
+  name: null
+  save_dir: ./wandb
+  log_model: false
+
+# backend: null uses wandb.enabled; set wandb|tensorboard|none to override (CLI ok).
+logging:
+  backend: null
+  tensorboard:
+    save_dir: ./tensorboard_logs
+    name: null
+
+trainer:
+  lightning:
+    max_epochs: 200
+    accelerator: auto
+    devices: 1
+    precision: 32
+    log_every_n_steps: 50
+    check_val_every_n_epoch: 1
+    val_check_interval: null
+    limit_val_batches: null
+    deterministic: false
+    fast_dev_run: false
+
+  val_logging:
+    enabled: true
+    num_samples: 8
+    log_every_n_val_epochs: 1
+
+  optim:
+    learning_rate: 0.00001
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+
+  ema:
+    enabled: true
+    decay: 0.9999
+    use_num_updates: true
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null

@@ -1,0 +1,31 @@
+name: trajectory_ddpm
+
+trajectory_key: trajectory
+
+timesteps: 1000
+beta_schedule: linear
+linear_start: 1.0e-3
+linear_end: 2.0e-2
+cosine_s: 8.0e-3
+
+parameterization: eps
+loss_type: l2
+
+backbone:
+  _target_: src.modules.backbones.moflowlike_backbone.MoflowlikeBackbone
+  seq_len: ${data.seq_len}
+  num_agents: ${data.num_agents}
+  coord_dim: ${data.coord_dim}
+  team_size: null
+  agent_embedding_dim: 64
+  pointnet_hidden_dim: 128
+  pointnet_num_layers: 3
+  pointnet_num_pre_layers: 1
+  d_model: 256
+  nhead: 8
+  dim_feedforward: 1024
+  transformer_dropout: 0.0
+  num_transformer_layers: 8
+  agentwise_mlp_hidden: [256, 64]
+  d_shared_head_mlp: 786
+  t_embedding_size: 128
