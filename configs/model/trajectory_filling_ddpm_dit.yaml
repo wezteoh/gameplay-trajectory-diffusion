@@ -1,0 +1,39 @@
+name: trajectory_filling_ddpm
+
+trajectory_key: trajectory
+context_key: context
+mask_key: obs_mask
+position_0_key: position_0
+
+guidance_scale: 2.0
+p_uncond: 0.1
+# When true, log a second video (GT-obs + predicted-deltas blend) alongside pure prediction.
+log_blend_trajectory_video: false
+
+timesteps: 1000
+beta_schedule: linear
+linear_start: 1.0e-4
+linear_end: 2.0e-2
+cosine_s: 8.0e-3
+
+parameterization: eps
+loss_type: l2
+
+backbone:
+  _target_: src.modules.backbones.dit_backbone.DITBackbone
+  max_seq_len: ${data.delta_len}
+  num_agents: ${data.num_agents}
+  coord_dim: ${data.coord_dim}
+  # train.py overrides this to 4 when include_delta_in_context=true.
+  context_channels: ${data.coord_dim}
+  context_dim: 256
+  n_temporal_layer: 4
+  d_model_temporal: 256
+  nhead_temporal: 8
+  d_ff_temporal: 512
+  n_spatial_layer: 4
+  d_model_spatial: 256
+  nhead_spatial: 8
+  d_ff_spatial: 512
+  num_timesteps: ${..timesteps}
+  patch_size: 5

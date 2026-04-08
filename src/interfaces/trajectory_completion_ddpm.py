@@ -224,10 +224,8 @@ class TrajectoryCompletionDDPMInterface(pl.LightningModule):
             else:
                 key = f"samples/trajectory_completion_{i}"
             if use_wandb:
-                stem = (
-                    f"sample_completion_e{self.current_epoch}_"
-                    f"s{self.global_step}_{i}.mp4"
-                )
+                # Stable names so each sampling cycle overwrites prior tmp mp4s.
+                stem = f"sample_completion_{i}.mp4"
                 video_path = os.path.join("tmp", stem)
                 create_video_from_frames(frames, video_path, fps=10)
                 log_payload[key] = wandb.Video(

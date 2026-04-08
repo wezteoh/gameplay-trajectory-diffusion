@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import torch
 
 
@@ -37,6 +39,48 @@ def denormalize_court_xy(
     )
     bias = torch.tensor([2.0, 2.0], device=xy.device, dtype=xy.dtype)
     return (xy + bias) * scale
+
+
+def _delta_affine_params(
+    delta: torch.Tensor,
+    shift: float | Sequence[float] | torch.Tensor,
+    scale: float | Sequence[float] | torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    c = int(delta.shape[-1])
+    sft = torch.as_tensor(shift, dtype=delta.dtype, device=delta.device).reshape(-1)
+    scl = torch.as_tensor(scale, dtype=delta.dtype, device=delta.device).reshape(-1)
+    if sft.numel() == 1:
+        sft = sft.expand(c).contiguous()
+    elif sft.numel() != c:
+        raise ValueError(f"shift must be scalar or length {c}, got {tuple(sft.shape)}")
+    if scl.numel() == 1:
+        scl = scl.expand(c).contiguous()
+    elif scl.numel() != c:
+        raise ValueError(f"scale must be scalar or length {c}, got {tuple(scl.shape)}")
+    for _ in range(delta.dim() - 1):
+        sft = sft.unsqueeze(0)
+        scl = scl.unsqueeze(0)
+    return sft, scl
+
+
+def normalize_delta(
+    delta: torch.Tensor,
+    shift: float | Sequence[float] | torch.Tensor,
+    scale: float | Sequence[float] | torch.Tensor,
+) -> torch.Tensor:
+    """Affine normalize last dim: (delta - shift) / scale (broadcast)."""
+    sft, scl = _delta_affine_params(delta, shift, scale)
+    return (delta - sft) / scl
+
+
+def denormalize_delta(
+    delta: torch.Tensor,
+    shift: float | Sequence[float] | torch.Tensor,
+    scale: float | Sequence[float] | torch.Tensor,
+) -> torch.Tensor:
+    """Inverse of normalize_delta."""
+    sft, scl = _delta_affine_params(delta, shift, scale)
+    return delta * scl + sft
 
 
 def denormalize_court_xy_numpy(
