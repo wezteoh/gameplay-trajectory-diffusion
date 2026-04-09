@@ -1,10 +1,10 @@
 from typing import Literal
 
 import matplotlib.lines as lines
-import torch
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from imageio import mimsave
 from matplotlib.axes import Axes
 from matplotlib.collections import LineCollection
@@ -293,9 +293,7 @@ class Court:
 
         self.court_type = court_type
         self.units = units
-        self.court_parameters = _get_court_params_in_desired_units(
-            self.court_type, self.units
-        )
+        self.court_parameters = _get_court_params_in_desired_units(self.court_type, self.units)
 
         if origin == "center":
             self.origin = np.array([0.0, 0.0])
@@ -504,22 +502,14 @@ class Court:
         angle_b = 12.3415314172  # Angle 2 for lower FT line
 
         if half is None:
-            ax.set_xlim(
-                origin_shift_x - court_x / 2 - pad, origin_shift_x + court_x / 2 + pad
-            )
-            ax.set_ylim(
-                origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad
-            )
+            ax.set_xlim(origin_shift_x - court_x / 2 - pad, origin_shift_x + court_x / 2 + pad)
+            ax.set_ylim(origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad)
         elif half == "l":
             ax.set_xlim(origin_shift_x - court_x / 2 - pad, origin_shift_x + cf)
-            ax.set_ylim(
-                origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad
-            )
+            ax.set_ylim(origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad)
         elif half == "r":
             ax.set_xlim(origin_shift_x - cf, origin_shift_x + court_x / 2 + pad)
-            ax.set_ylim(
-                origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad
-            )
+            ax.set_ylim(origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad)
 
         # Draw the main court rectangle
         self._draw_rectangle(
@@ -570,14 +560,10 @@ class Court:
 
         # Draw the hoops
         left_hoop_x = (
-            origin_shift_x
-            - court_x / 2
-            + self.court_parameters["hoop_distance_from_edge"]
+            origin_shift_x - court_x / 2 + self.court_parameters["hoop_distance_from_edge"]
         )
         right_hoop_x = (
-            origin_shift_x
-            + court_x / 2
-            - self.court_parameters["hoop_distance_from_edge"]
+            origin_shift_x + court_x / 2 - self.court_parameters["hoop_distance_from_edge"]
         )
         # Left side
         if half is None or half == "l":
@@ -883,9 +869,7 @@ class Court:
 
         # Draw three point areas
         # Draw the arcs arcs
-        arc_diameter = (
-            self.court_parameters["three_point_arc_diameter"] - line_width / 2
-        )
+        arc_diameter = self.court_parameters["three_point_arc_diameter"] - line_width / 2
         arc_angle = self.court_parameters["three_point_arc_angle"]
         # Left arc
         if half is None or half == "l":
@@ -1031,22 +1015,14 @@ class Court:
         cf = line_width / 2
 
         if half is None:
-            ax.set_ylim(
-                origin_shift_x - court_x / 2 - pad, origin_shift_x + court_x / 2 + pad
-            )
-            ax.set_xlim(
-                -origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad
-            )
+            ax.set_ylim(origin_shift_x - court_x / 2 - pad, origin_shift_x + court_x / 2 + pad)
+            ax.set_xlim(-origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad)
         elif half == "d":
             ax.set_ylim(origin_shift_x - court_x / 2 - pad, origin_shift_x + cf)
-            ax.set_xlim(
-                -origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad
-            )
+            ax.set_xlim(-origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad)
         elif half == "u":
             ax.set_ylim(origin_shift_x - cf, origin_shift_x + court_x / 2 + pad)
-            ax.set_xlim(
-                -origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad
-            )
+            ax.set_xlim(-origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad)
 
         # Draw the main court rectangle
         self._draw_rectangle(
@@ -1097,14 +1073,10 @@ class Court:
 
         # Draw the hoops
         left_hoop_x = (
-            origin_shift_x
-            - court_x / 2
-            + self.court_parameters["hoop_distance_from_edge"]
+            origin_shift_x - court_x / 2 + self.court_parameters["hoop_distance_from_edge"]
         )
         right_hoop_x = (
-            origin_shift_x
-            + court_x / 2
-            - self.court_parameters["hoop_distance_from_edge"]
+            origin_shift_x + court_x / 2 - self.court_parameters["hoop_distance_from_edge"]
         )
         # Left side
         if half is None or half == "d":
@@ -1411,9 +1383,7 @@ class Court:
 
         # Draw three point areas
         # Draw the arcs arcs
-        arc_diameter = (
-            self.court_parameters["three_point_arc_diameter"] - line_width / 2
-        )
+        arc_diameter = self.court_parameters["three_point_arc_diameter"] - line_width / 2
         arc_angle = self.court_parameters["three_point_arc_angle"]
         # Left arc
         if half is None or half == "d":
@@ -1693,7 +1663,7 @@ def create_basketball_frame(
     frame_idx: int,
     *,
     history: int = 5,
-    trace_lw: float = 1.35,
+    trace_lw: float = 3.5,
     ball_trace: bool = True,
 ) -> np.ndarray:
     """
@@ -1715,7 +1685,7 @@ def create_basketball_frame(
         raise ValueError(f"frame_idx {frame_idx} out of range for T={t_len}")
     hist_n = max(1, int(history))
 
-    fig, ax = plt.subplots(1, 1, figsize=(7.5, 4), dpi=32)
+    fig, ax = plt.subplots(1, 1, figsize=(15, 8), dpi=32)
     court = Court(court_type="nba", origin="bottom-left", units="ft")
     court.draw(ax=ax, showaxis=False)
 
@@ -1738,7 +1708,7 @@ def create_basketball_frame(
             ax.scatter(
                 [xy[0, 0]],
                 [xy[0, 1]],
-                s=28,
+                s=35,
                 c=[color],
                 edgecolors="white",
                 linewidths=0.9,
@@ -1752,7 +1722,7 @@ def create_basketball_frame(
         ax.scatter(
             [xy[0]],
             [xy[1]],
-            s=28,
+            s=35,
             c=[color],
             edgecolors="white",
             linewidths=0.9,
@@ -1844,7 +1814,7 @@ def create_frames_from_trajectory(
     trajectory: np.ndarray,
     game: str,
     *,
-    basketball_ball_trace: bool = True,
+    basketball_ball_trace: bool = False,
 ) -> list[np.ndarray]:
     """
     create frames from a trajectory
@@ -1857,9 +1827,7 @@ def create_frames_from_trajectory(
     traj = np.asarray(trajectory)
     if game == "basketball":
         for t in range(traj.shape[0]):
-            frames.append(
-                create_basketball_frame(traj, t, ball_trace=basketball_ball_trace)
-            )
+            frames.append(create_basketball_frame(traj, t, ball_trace=basketball_ball_trace))
         return frames
     for pts in trajectory:
         if game == "soccer":

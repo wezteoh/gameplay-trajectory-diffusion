@@ -92,9 +92,9 @@ def _parse_args() -> argparse.Namespace:
         help="Do not copy EMA weights into the model before sampling.",
     )
     p.add_argument(
-        "--no-npz",
+        "--save-npz",
         action="store_true",
-        help="Skip writing trajectory_*.npz files.",
+        help="Write trajectory_*.npz files (off by default).",
     )
     p.add_argument(
         "--save-videos",
@@ -549,7 +549,7 @@ def main() -> None:
     court_w = float(module.court_width)
     court_h = float(module.court_height)
 
-    if not args.no_npz:
+    if args.save_npz:
         for i in range(n):
             court_xy = denormalize_court_xy_numpy(x_np[i], court_w, court_h)
             stem = f"trajectory_{i:04d}.npz"
@@ -620,8 +620,10 @@ def main() -> None:
         f.write(OmegaConf.to_yaml(cfg, resolve=True))
 
     print(f"Task: {task}. Saved {n} sample(s) under {out_dir}/")
-    if not args.no_npz:
+    if args.save_npz:
         print(f"Wrote trajectory npz files and {cfg_dump}")
+    else:
+        print(f"Wrote {cfg_dump}")
 
 
 if __name__ == "__main__":

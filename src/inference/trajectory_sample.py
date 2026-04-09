@@ -35,6 +35,12 @@ def sampling_options_from_cfg(cfg: DictConfig | None) -> tuple[str, dict[str, An
 
 
 def _merge_dpm_options(dpm_config: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge YAML/script DPM hyperparameters.
+
+    ``trace_every`` is not merged: it is only honored via the explicit
+    ``trace_every`` argument to :func:`sample_with_trace` (training/validation
+    sampling passes ``None`` so denoising checkpoints are not collected).
+    """
     defaults: dict[str, Any] = {
         "steps": 20,
         "order": 3,
@@ -47,6 +53,8 @@ def _merge_dpm_options(dpm_config: dict[str, Any] | None) -> dict[str, Any]:
     }
     if dpm_config:
         for k, v in dpm_config.items():
+            if k == "trace_every":
+                continue
             if v is not None:
                 defaults[k] = v
     return defaults
