@@ -51,6 +51,18 @@ trainer:
     decay: 0.9999
     use_num_updates: true
 
+# Validation / script sampling: ancestral DDPM or DPM-Solver (see src/sampling/dpm_solver.py).
+sampling:
+  method: ancestral
+  dpm:
+    steps: 20
+    order: 3
+    skip_type: time_uniform
+    algorithm_type: dpmsolver++
+    solver_method: singlestep
+    lower_order_final: true
+    denoise_to_zero: false
+
 hydra:
   run:
     dir: .

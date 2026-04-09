@@ -73,48 +73,33 @@ class TrajectoryDDPMModel(nn.Module):
         verbose: bool = False,
         cfg_null_context: torch.Tensor | None = None,
         cfg_null_mask: torch.Tensor | None = None,
+        sampler: str = "ancestral",
+        dpm_config: dict | None = None,
     ) -> torch.Tensor:
-        """Ancestral DDPM sampling; returns x_0 shaped [B, S, N, C]."""
-        shape = (batch_size, seq_len, num_agents, coord_dim)
-        x = torch.randn(shape, device=device, dtype=dtype)
-        if context is None:
-            context = torch.zeros(shape, device=device, dtype=dtype)
-        gs = float(guidance_scale)
-        use_cfg = gs != 1.0
-        if cfg_null_context is None:
-            null_ctx = torch.zeros_like(context)
-        else:
-            null_ctx = cfg_null_context
-        accepts_mask = self._backbone_accepts_mask()
-        if use_cfg and accepts_mask:
-            if cfg_null_mask is not None:
-                null_m = cfg_null_mask
-            elif obs_mask is not None:
-                null_m = torch.zeros_like(obs_mask, dtype=dtype, device=device)
-            else:
-                null_m = torch.zeros(
-                    batch_size, seq_len, num_agents, device=device, dtype=dtype
-                )
-        else:
-            null_m = None
-        if verbose:
-            print("sampling")
-        for step in reversed(range(self.schedule.num_timesteps)):
-            t = torch.full(
-                (batch_size,),
-                step,
-                device=device,
-                dtype=torch.long,
-            )
-            if use_cfg:
-                eps_u = self._call_backbone(x, t, null_ctx, null_m)
-                eps_c = self._call_backbone(x, t, context, obs_mask)
-                noise_pred = eps_u + gs * (eps_c - eps_u)
-            else:
-                noise_pred = self._call_backbone(x, t, context, obs_mask)
-            x = self.schedule.p_sample_step(x, t, noise_pred)
-            if verbose:
-                in_b = (x >= -2) & (x <= 2)
-                percentage = in_b.all(dim=-1).float().mean() * 100
-                print(f"step {step}: {percentage.item()}% within bounds")
+        """Reverse sampling; returns x_0 shaped [B, S, N, C].
+
+        ``sampler`` is ``\"ancestral\"`` or ``\"dpm\"`` (DPM-Solver). When ``dpm``,
+        pass optional ``dpm_config`` (steps, order, etc.); see
+        :func:`src.inference.trajectory_sample.sample_with_trace`.
+        """
+        from src.inference.trajectory_sample import sample_with_trace
+
+        x, _ = sample_with_trace(
+            self,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            num_agents=num_agents,
+            coord_dim=coord_dim,
+            device=device,
+            context=context,
+            obs_mask=obs_mask,
+            guidance_scale=guidance_scale,
+            dtype=dtype,
+            verbose=verbose,
+            cfg_null_context=cfg_null_context,
+            cfg_null_mask=cfg_null_mask,
+            trace_every=None,
+            sampler=sampler,
+            dpm_config=dpm_config,
+        )
         return x

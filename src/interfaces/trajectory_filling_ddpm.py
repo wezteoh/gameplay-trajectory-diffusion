@@ -88,6 +88,8 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
         ema_use_num_updates: bool = True,
         p_uncond: float = 0.1,
         guidance_scale: float = 1.0,
+        sampling_method: str = "ancestral",
+        sampling_dpm: dict | None = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -125,6 +127,8 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
         self.log_blend_trajectory_video = bool(log_blend_trajectory_video)
         self.p_uncond = float(p_uncond)
         self.guidance_scale = float(guidance_scale)
+        self.sampling_method = str(sampling_method)
+        self.sampling_dpm = dict(sampling_dpm) if sampling_dpm else {}
 
         cf = list(context_fill)
         if len(cf) != 2:
@@ -298,6 +302,8 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
             dtype=dtype,
             cfg_null_context=fill,
             cfg_null_mask=null_mask,
+            sampler=self.sampling_method,
+            dpm_config=self.sampling_dpm,
         )
         d_raw = denormalize_delta(
             deltas_hat,

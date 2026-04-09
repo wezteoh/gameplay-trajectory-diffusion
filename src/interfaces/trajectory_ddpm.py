@@ -46,6 +46,8 @@ class TrajectoryDDPMInterface(pl.LightningModule):
         ema_enabled: bool = True,
         ema_decay: float = 0.9999,
         ema_use_num_updates: bool = True,
+        sampling_method: str = "ancestral",
+        sampling_dpm: dict | None = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -73,6 +75,8 @@ class TrajectoryDDPMInterface(pl.LightningModule):
         self.val_logging_enabled = bool(val_logging_enabled)
         self.val_num_samples = max(0, int(val_num_samples))
         self.log_every_n_val_epochs = int(log_every_n_val_epochs)
+        self.sampling_method = str(sampling_method)
+        self.sampling_dpm = dict(sampling_dpm) if sampling_dpm else {}
 
     def _check_batch_shape(self, x0: torch.Tensor) -> None:
         if x0.dim() != 4:
@@ -159,6 +163,8 @@ class TrajectoryDDPMInterface(pl.LightningModule):
             num_agents=self.num_agents,
             coord_dim=self.coord_dim,
             device=self.device,
+            sampler=self.sampling_method,
+            dpm_config=self.sampling_dpm,
         )
         if was_training:
             self.train()

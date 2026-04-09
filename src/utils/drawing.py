@@ -1665,19 +1665,110 @@ class Court:
         ax.add_patch(pathpatch)
 
 
-def create_basketball_frame(pts: np.ndarray) -> np.ndarray:
+# ---------- styling helpers (basketball traces + draw_trajectories_on_court) ----------
+COLOR_BALL = (0.85, 0.20, 0.18)  # red-ish
+COLOR_HOME = (0.15, 0.40, 0.85)  # blue-ish
+COLOR_AWAY = (0.10, 0.75, 0.35)  # green-ish
+
+
+def _fade_line(ax, xy, color, lw=2.2, alpha_min=0.15, alpha_max=1.0, z=3):
     """
-    create a basketball frame
+    Draw polyline with segment-wise fading (start=alpha_min -> end=alpha_max).
+    xy: (T,2)
     """
+    xy = np.asarray(xy, dtype=float)
+    if len(xy) < 2:
+        return
+    segs = np.concatenate([xy[:-1, None, :], xy[1:, None, :]], axis=1)  # (T-1, 2, 2)
+    n = segs.shape[0]
+    alphas = np.linspace(alpha_min, alpha_max, n)
+    rgba = np.tile((*color, 1.0), (n, 1))
+    rgba[:, 3] = alphas
+    lc = LineCollection(segs, colors=rgba, linewidths=lw, zorder=z, capstyle="round")
+    ax.add_collection(lc)
+
+
+def create_basketball_frame(
+    trajectory: np.ndarray,
+    frame_idx: int,
+    *,
+    history: int = 5,
+    trace_lw: float = 1.35,
+    ball_trace: bool = True,
+) -> np.ndarray:
+    """
+    Render one basketball court frame with a short motion trace per entity.
+
+    ``trajectory`` has shape ``(T, N, 2)`` in court units. For frame ``frame_idx``,
+    draws up to ``history`` positions ending at the current time (weak alpha for
+    older segments, strong for the newest), then home, away, ball (indices
+    ``0:5``, ``5:10``, ``10:``) so the ball appears on top.
+
+    If ``ball_trace`` is False, players keep traces but the ball is drawn only at
+    its current position (no motion history for the ball).
+    """
+    traj = np.asarray(trajectory, dtype=float)
+    if traj.ndim != 3 or traj.shape[-1] != 2:
+        raise ValueError(f"Expected trajectory (T, N, 2), got shape {traj.shape}")
+    t_len, n_ent, _ = traj.shape
+    if frame_idx < 0 or frame_idx >= t_len:
+        raise ValueError(f"frame_idx {frame_idx} out of range for T={t_len}")
+    hist_n = max(1, int(history))
+
     fig, ax = plt.subplots(1, 1, figsize=(7.5, 4), dpi=32)
     court = Court(court_type="nba", origin="bottom-left", units="ft")
     court.draw(ax=ax, showaxis=False)
-    for pt in pts[10:]:
-        ax.scatter(pt[0], pt[1], color="red")
-    for pt in pts[0:5]:
-        ax.scatter(pt[0], pt[1], color="blue")
-    for pt in pts[5:10]:
-        ax.scatter(pt[0], pt[1], color="green")
+
+    def _trace_entity(entity_idx: int, color: tuple, z: int) -> None:
+        if entity_idx < 0 or entity_idx >= n_ent:
+            return
+        t0 = max(0, frame_idx - hist_n + 1)
+        xy = traj[t0 : frame_idx + 1, entity_idx, :]
+        if xy.shape[0] >= 2:
+            _fade_line(
+                ax,
+                xy,
+                color,
+                lw=trace_lw,
+                alpha_min=0.22,
+                alpha_max=1.0,
+                z=z,
+            )
+        else:
+            ax.scatter(
+                [xy[0, 0]],
+                [xy[0, 1]],
+                s=28,
+                c=[color],
+                edgecolors="white",
+                linewidths=0.9,
+                zorder=z + 1,
+            )
+
+    def _ball_current_only(entity_idx: int, color: tuple, z: int) -> None:
+        if entity_idx < 0 or entity_idx >= n_ent:
+            return
+        xy = traj[frame_idx, entity_idx, :]
+        ax.scatter(
+            [xy[0]],
+            [xy[1]],
+            s=28,
+            c=[color],
+            edgecolors="white",
+            linewidths=0.9,
+            zorder=z + 1,
+        )
+
+    for i in range(min(5, n_ent)):
+        _trace_entity(i, COLOR_HOME, z=3)
+    for i in range(5, min(10, n_ent)):
+        _trace_entity(i, COLOR_AWAY, z=3)
+    for i in range(10, n_ent):
+        if ball_trace:
+            _trace_entity(i, COLOR_BALL, z=5)
+        else:
+            _ball_current_only(i, COLOR_BALL, z=5)
+
     fig.canvas.draw()  # ensure the renderer has drawn
     w, h = fig.canvas.get_width_height()
     # Prefer buffer_rgba if available
@@ -1750,16 +1841,28 @@ def create_football_frame(pts: np.ndarray) -> np.ndarray:
 
 
 def create_frames_from_trajectory(
-    trajectory: np.ndarray, game: str
+    trajectory: np.ndarray,
+    game: str,
+    *,
+    basketball_ball_trace: bool = True,
 ) -> list[np.ndarray]:
     """
     create frames from a trajectory
+
+    For basketball, ``basketball_ball_trace`` controls whether the ball (indices
+    ``>= 10``) gets a short motion trace; when False, only the current ball
+    position is drawn (players still get traces).
     """
     frames = []
+    traj = np.asarray(trajectory)
+    if game == "basketball":
+        for t in range(traj.shape[0]):
+            frames.append(
+                create_basketball_frame(traj, t, ball_trace=basketball_ball_trace)
+            )
+        return frames
     for pts in trajectory:
-        if game == "basketball":
-            frame = create_basketball_frame(pts)
-        elif game == "soccer":
+        if game == "soccer":
             frame = create_soccer_frame(pts)
         elif game == "football":
             frame = create_football_frame(pts)
@@ -1794,29 +1897,6 @@ def frames_to_tb_video_tensor(frames: list[np.ndarray]) -> torch.Tensor:
     stacked = np.clip(stacked, 0.0, 1.0)
     vid = torch.from_numpy(stacked).permute(0, 3, 1, 2).unsqueeze(0)
     return torch.clamp(vid, 0.0, 1.0)
-
-
-# ---------- styling helpers ----------
-COLOR_BALL = (0.85, 0.20, 0.18)  # red-ish
-COLOR_HOME = (0.15, 0.40, 0.85)  # blue-ish
-COLOR_AWAY = (0.10, 0.75, 0.35)  # green-ish
-
-
-def _fade_line(ax, xy, color, lw=2.2, alpha_min=0.15, alpha_max=1.0, z=3):
-    """
-    Draw polyline with segment-wise fading (start=alpha_min -> end=alpha_max).
-    xy: (T,2)
-    """
-    xy = np.asarray(xy, dtype=float)
-    if len(xy) < 2:
-        return
-    segs = np.concatenate([xy[:-1, None, :], xy[1:, None, :]], axis=1)  # (T-1, 2, 2)
-    n = segs.shape[0]
-    alphas = np.linspace(alpha_min, alpha_max, n)
-    rgba = np.tile((*color, 1.0), (n, 1))
-    rgba[:, 3] = alphas
-    lc = LineCollection(segs, colors=rgba, linewidths=lw, zorder=z, capstyle="round")
-    ax.add_collection(lc)
 
 
 def _end_marker(ax, xy, color, size=36, edge="white", edge_w=1.2, z=5):

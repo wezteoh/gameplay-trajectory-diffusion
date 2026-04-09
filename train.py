@@ -35,6 +35,19 @@ def _build_datamodule(data_cfg: DictConfig) -> Any:
     raise ValueError(f"Unsupported dataset: {data_cfg.name}")
 
 
+def _sampling_kwargs(cfg: DictConfig) -> tuple[str, dict[str, Any]]:
+    """Read ``cfg.sampling`` for validation / checkpoint sampling (ancestral vs DPM-Solver)."""
+    s = OmegaConf.select(cfg, "sampling", default=None)
+    if s is None:
+        return "ancestral", {}
+    method = str(OmegaConf.select(s, "method", default="ancestral"))
+    raw = OmegaConf.select(s, "dpm", default={})
+    dpm = OmegaConf.to_container(raw, resolve=True) if raw is not None else {}
+    if not isinstance(dpm, dict):
+        dpm = {}
+    return method, dpm
+
+
 def _build_module(cfg: DictConfig) -> pl.LightningModule:
     model_cfg = cfg.model
     model_name = str(OmegaConf.select(model_cfg, "name", default="trajectory_ddpm"))
@@ -79,6 +92,7 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
     )
     court_w = float(OmegaConf.select(data_cfg, "court_width", default=94.0))
     court_h = float(OmegaConf.select(data_cfg, "court_height", default=50.0))
+    sampling_method, sampling_dpm = _sampling_kwargs(cfg)
     vl = OmegaConf.select(cfg, "trainer.val_logging", default=None)
     if vl is None:
         val_logging_enabled = bool(cfg.wandb.enabled)
@@ -145,6 +159,8 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
             ema_use_num_updates=ema_use_num_updates,
             p_uncond=p_uncond,
             guidance_scale=guidance_scale,
+            sampling_method=sampling_method,
+            sampling_dpm=sampling_dpm,
         )
 
     if model_name == "trajectory_filling_ddpm":
@@ -224,6 +240,8 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
             p_uncond=p_uncond,
             guidance_scale=guidance_scale,
             log_blend_trajectory_video=log_blend_trajectory_video,
+            sampling_method=sampling_method,
+            sampling_dpm=sampling_dpm,
         )
 
     if model_name != "trajectory_ddpm":
@@ -248,6 +266,8 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
         ema_enabled=ema_enabled,
         ema_decay=ema_decay,
         ema_use_num_updates=ema_use_num_updates,
+        sampling_method=sampling_method,
+        sampling_dpm=sampling_dpm,
     )
 
 

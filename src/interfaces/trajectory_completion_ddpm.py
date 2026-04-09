@@ -48,6 +48,8 @@ class TrajectoryCompletionDDPMInterface(pl.LightningModule):
         ema_use_num_updates: bool = True,
         p_uncond: float = 0.1,
         guidance_scale: float = 1.0,
+        sampling_method: str = "ancestral",
+        sampling_dpm: dict | None = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -80,6 +82,8 @@ class TrajectoryCompletionDDPMInterface(pl.LightningModule):
         self.log_every_n_val_epochs = int(log_every_n_val_epochs)
         self.p_uncond = float(p_uncond)
         self.guidance_scale = float(guidance_scale)
+        self.sampling_method = str(sampling_method)
+        self.sampling_dpm = dict(sampling_dpm) if sampling_dpm else {}
 
     def _check_batch_shape(
         self,
@@ -201,6 +205,8 @@ class TrajectoryCompletionDDPMInterface(pl.LightningModule):
             context=past,
             guidance_scale=self.guidance_scale,
             dtype=past.dtype,
+            sampler=self.sampling_method,
+            dpm_config=self.sampling_dpm,
         )
         anchor = past[:, -1]
         future_abs = future_hat + anchor.unsqueeze(1)

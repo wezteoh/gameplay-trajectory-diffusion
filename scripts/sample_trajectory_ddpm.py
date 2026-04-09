@@ -23,6 +23,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from src.inference.trajectory_sample import model_name as _model_name  # noqa: E402
+from src.inference.trajectory_sample import (  # noqa: E402
+    sample_with_trace,
+    sampling_options_from_cfg,
+)
 from src.interfaces.trajectory_filling_ddpm import (  # noqa: E402
     _blend_traj_rollout_from_last_observed,
 )
@@ -140,6 +145,25 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print per-step DDPM sampling progress.",
     )
+    p.add_argument(
+        "--sampling-method",
+        type=str,
+        default=None,
+        choices=("ancestral", "dpm"),
+        help="Override cfg.sampling.method (ancestral or dpm). Default: from checkpoint config.",
+    )
+    p.add_argument(
+        "--dpm-steps",
+        type=int,
+        default=None,
+        help="Override cfg.sampling.dpm.steps when --sampling-method=dpm.",
+    )
+    p.add_argument(
+        "--dpm-order",
+        type=int,
+        default=None,
+        help="Override cfg.sampling.dpm.order when using DPM-Solver.",
+    )
     return p.parse_args()
 
 
@@ -167,10 +191,6 @@ def _load_data_preset(name: str) -> DictConfig:
 def _merge_data_cfg(cfg: DictConfig, data: DictConfig) -> None:
     OmegaConf.resolve(data)
     cfg.data = data
-
-
-def _model_name(cfg: DictConfig) -> str:
-    return str(OmegaConf.select(cfg, "model.name", default="trajectory_ddpm"))
 
 
 def _validate_task_shapes(cfg: DictConfig) -> None:
@@ -222,6 +242,23 @@ def _validate_task_shapes(cfg: DictConfig) -> None:
             )
 
 
+def _merge_sampling_cli(cfg: DictConfig, args: argparse.Namespace) -> None:
+    """Apply optional CLI overrides onto ``cfg.sampling``."""
+    if args.sampling_method is not None:
+        if OmegaConf.select(cfg, "sampling") is None:
+            cfg.sampling = OmegaConf.create({})
+        cfg.sampling.method = str(args.sampling_method)
+    if args.dpm_steps is not None or args.dpm_order is not None:
+        if OmegaConf.select(cfg, "sampling") is None:
+            cfg.sampling = OmegaConf.create({})
+        if OmegaConf.select(cfg, "sampling.dpm") is None:
+            cfg.sampling.dpm = OmegaConf.create({})
+        if args.dpm_steps is not None:
+            cfg.sampling.dpm.steps = int(args.dpm_steps)
+        if args.dpm_order is not None:
+            cfg.sampling.dpm.order = int(args.dpm_order)
+
+
 def _ensure_nba_data_root(cfg: DictConfig) -> None:
     """Resolve train/val .npy paths relative to the repo root."""
     name = str(cfg.data.name)
@@ -257,73 +294,6 @@ def _val_batch_first_n(
     return merged
 
 
-@torch.no_grad()
-def _sample_with_trace(
-    model: Any,
-    *,
-    batch_size: int,
-    seq_len: int,
-    num_agents: int,
-    coord_dim: int,
-    device: torch.device,
-    context: torch.Tensor | None = None,
-    obs_mask: torch.Tensor | None = None,
-    guidance_scale: float = 1.0,
-    dtype: torch.dtype = torch.float32,
-    verbose: bool = False,
-    cfg_null_context: torch.Tensor | None = None,
-    cfg_null_mask: torch.Tensor | None = None,
-    trace_every: int | None = None,
-) -> tuple[torch.Tensor, list[tuple[int, torch.Tensor]]]:
-    """Sampling with optional intermediate snapshots as (step, x_t)."""
-    shape = (batch_size, seq_len, num_agents, coord_dim)
-    x = torch.randn(shape, device=device, dtype=dtype)
-    traces: list[tuple[int, torch.Tensor]] = []
-
-    if trace_every is not None and trace_every > 0:
-        traces.append((int(model.schedule.num_timesteps), x.detach().clone()))
-
-    if context is None:
-        context = torch.zeros(shape, device=device, dtype=dtype)
-    gs = float(guidance_scale)
-    use_cfg = gs != 1.0
-    null_ctx = (
-        torch.zeros_like(context) if cfg_null_context is None else cfg_null_context
-    )
-    accepts_mask = model._backbone_accepts_mask()
-    if use_cfg and accepts_mask:
-        if cfg_null_mask is not None:
-            null_m = cfg_null_mask
-        elif obs_mask is not None:
-            null_m = torch.zeros_like(obs_mask, dtype=dtype, device=device)
-        else:
-            null_m = torch.zeros(
-                batch_size, seq_len, num_agents, device=device, dtype=dtype
-            )
-    else:
-        null_m = None
-
-    if verbose:
-        print("sampling")
-    for step in reversed(range(model.schedule.num_timesteps)):
-        t = torch.full((batch_size,), step, device=device, dtype=torch.long)
-        if use_cfg:
-            eps_u = model._call_backbone(x, t, null_ctx, null_m)
-            eps_c = model._call_backbone(x, t, context, obs_mask)
-            noise_pred = eps_u + gs * (eps_c - eps_u)
-        else:
-            noise_pred = model._call_backbone(x, t, context, obs_mask)
-        x = model.schedule.p_sample_step(x, t, noise_pred)
-        if trace_every is not None and trace_every > 0:
-            if step == 0 or (step % int(trace_every) == 0):
-                traces.append((int(step), x.detach().clone()))
-        if verbose:
-            in_b = (x >= -2) & (x <= 2)
-            percentage = in_b.all(dim=-1).float().mean() * 100
-            print(f"step {step}: {percentage.item()}% within bounds")
-    return x, traces
-
-
 def _sample_for_task(
     module: Any,
     cfg: DictConfig,
@@ -340,9 +310,10 @@ def _sample_for_task(
     """Run sampling; returns tensor for visualization (normalized positions) and metadata."""
     mname = _model_name(cfg)
     meta: dict[str, Any] = {"task": mname}
+    sm, dpm_d = sampling_options_from_cfg(cfg)
 
     if mname == "trajectory_ddpm":
-        x, traces = _sample_with_trace(
+        x, traces = sample_with_trace(
             module.model,
             batch_size=n,
             seq_len=int(module.seq_len),
@@ -351,6 +322,8 @@ def _sample_for_task(
             device=device,
             verbose=verbose,
             trace_every=trace_every,
+            sampler=sm,
+            dpm_config=dpm_d,
         )
         meta["seq_len"] = int(module.seq_len)
         meta["evolution_traces"] = traces
@@ -368,7 +341,7 @@ def _sample_for_task(
             if guidance_scale_override is None
             else float(guidance_scale_override)
         )
-        future_hat, future_traces = _sample_with_trace(
+        future_hat, future_traces = sample_with_trace(
             module.model,
             batch_size=n,
             seq_len=int(module.future_len),
@@ -380,6 +353,8 @@ def _sample_for_task(
             dtype=past.dtype,
             verbose=verbose,
             trace_every=trace_every,
+            sampler=sm,
+            dpm_config=dpm_d,
         )
         anchor = past[:, -1]
         future_abs = future_hat + anchor.unsqueeze(1)
@@ -417,7 +392,7 @@ def _sample_for_task(
             device=device,
             dtype=dtype,
         )
-        deltas_hat, delta_traces = _sample_with_trace(
+        deltas_hat, delta_traces = sample_with_trace(
             module.model,
             batch_size=n,
             seq_len=int(module.seq_len),
@@ -432,6 +407,8 @@ def _sample_for_task(
             cfg_null_context=fill,
             cfg_null_mask=null_mask,
             trace_every=trace_every,
+            sampler=sm,
+            dpm_config=dpm_d,
         )
         d_raw = denormalize_delta(
             deltas_hat,
@@ -526,6 +503,7 @@ def main() -> None:
     if args.data is not None:
         _merge_data_cfg(cfg, _load_data_preset(args.data))
     OmegaConf.resolve(cfg)
+    _merge_sampling_cli(cfg, args)
     _validate_task_shapes(cfg)
 
     seed = int(cfg.seed) if args.seed is None else int(args.seed)
@@ -624,7 +602,11 @@ def main() -> None:
                         court_w,
                         court_h,
                     )
-                    step_frames = create_frames_from_trajectory(court_xy_step, "basketball")
+                    step_frames = create_frames_from_trajectory(
+                        court_xy_step,
+                        "basketball",
+                        basketball_ball_trace=False,
+                    )
                     if not step_frames:
                         continue
                     evo_path = os.path.join(
