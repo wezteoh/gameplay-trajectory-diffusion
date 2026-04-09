@@ -1,3 +1,3 @@
-from src.interfaces.trajectory_ddpm import TrajectoryDDPMInterface
+from src.interfaces.trajectory_filling_ddpm import TrajectoryFillingDDPMInterface
 
-__all__ = ["TrajectoryDDPMInterface"]
+__all__ = ["TrajectoryFillingDDPMInterface"]

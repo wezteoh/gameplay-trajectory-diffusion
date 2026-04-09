@@ -81,7 +81,7 @@ def _parse_args() -> argparse.Namespace:
         "--guidance-scale",
         type=float,
         default=None,
-        help="Override CFG scale for completion/filling.",
+        help="Override classifier-free guidance scale (filling).",
     )
     p.add_argument(
         "--seed",
@@ -127,25 +127,19 @@ def _ground_truth_normalized(
     mname: str,
 ) -> torch.Tensor:
     """Full trajectory in normalized court space ``[B, T, A, 2]``."""
-    traj_key = str(module.trajectory_key)
-    if mname == "trajectory_ddpm":
-        return batch[traj_key]
-    if mname == "trajectory_completion_ddpm":
-        ctx_key = str(module.context_key)
-        past = batch[ctx_key]
-        fut_rel = batch[traj_key]
-        anchor = past[:, -1]
-        return torch.cat([past, fut_rel + anchor.unsqueeze(1)], dim=1)
-    if mname == "trajectory_filling_ddpm":
-        pos0 = batch[str(module.position_0_key)]
-        x0 = batch[traj_key]
-        d_raw = denormalize_delta(
-            x0,
-            module._delta_shift,
-            module._delta_scale,
+    if mname != "trajectory_filling_ddpm":
+        raise ValueError(
+            f"Unsupported model.name: {mname!r}; expected 'trajectory_filling_ddpm'"
         )
-        return pos0.unsqueeze(1) + torch.cumsum(d_raw, dim=1)
-    raise ValueError(f"Unsupported model.name: {mname!r}")
+    traj_key = str(module.trajectory_key)
+    pos0 = batch[str(module.position_0_key)]
+    x0 = batch[traj_key]
+    d_raw = denormalize_delta(
+        x0,
+        module._delta_shift,
+        module._delta_scale,
+    )
+    return pos0.unsqueeze(1) + torch.cumsum(d_raw, dim=1)
 
 
 def _val_sample_total(val_loader: Any, max_samples: int | None) -> int | None:

@@ -11,12 +11,7 @@ from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 
 from hydra.utils import instantiate
 
-from src.data.nba_trajectory import NBATrajectoryDataModule
-from src.data.nba_trajectory_completion import NBATrajectoryCompletionDataModule
 from src.data.nba_trajectory_filling import NBATrajectoryFillingDataModule
-from src.data.synthetic_trajectory import SyntheticTrajectoryDataModule
-from src.interfaces.trajectory_completion_ddpm import TrajectoryCompletionDDPMInterface
-from src.interfaces.trajectory_ddpm import TrajectoryDDPMInterface
 from src.interfaces.trajectory_filling_ddpm import TrajectoryFillingDDPMInterface
 from src.modules.diffusion.schedule import DDPMNoiseSchedule
 from src.modules.models.ddpm import TrajectoryDDPMModel
@@ -24,12 +19,6 @@ from src.modules.models.ddpm import TrajectoryDDPMModel
 
 def _build_datamodule(data_cfg: DictConfig) -> Any:
     params = OmegaConf.to_container(data_cfg.params, resolve=True)
-    if data_cfg.name == "trajectory_synthetic":
-        return SyntheticTrajectoryDataModule(**params)
-    if data_cfg.name == "trajectory_nba":
-        return NBATrajectoryDataModule(**params)
-    if data_cfg.name == "trajectory_nba_completion":
-        return NBATrajectoryCompletionDataModule(**params)
     if data_cfg.name == "trajectory_nba_filling":
         return NBATrajectoryFillingDataModule(**params)
     raise ValueError(f"Unsupported dataset: {data_cfg.name}")
@@ -50,7 +39,13 @@ def _sampling_kwargs(cfg: DictConfig) -> tuple[str, dict[str, Any]]:
 
 def _build_module(cfg: DictConfig) -> pl.LightningModule:
     model_cfg = cfg.model
-    model_name = str(OmegaConf.select(model_cfg, "name", default="trajectory_ddpm"))
+    model_name = str(
+        OmegaConf.select(model_cfg, "name", default="trajectory_filling_ddpm")
+    )
+    if model_name != "trajectory_filling_ddpm":
+        raise ValueError(
+            f"Unsupported model name: {model_name!r}; expected 'trajectory_filling_ddpm'"
+        )
 
     data_cfg = cfg.data
     optim = OmegaConf.to_container(cfg.trainer.optim, resolve=True)
@@ -64,20 +59,17 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
         )
     )
 
-    if model_name == "trajectory_filling_ddpm":
-        include_delta_ctx = bool(
-            OmegaConf.select(
-                data_cfg, "params.include_delta_in_context", default=False
-            )
+    include_delta_ctx = bool(
+        OmegaConf.select(
+            data_cfg, "params.include_delta_in_context", default=False
         )
-        context_channels = 4 if include_delta_ctx else int(data_cfg.coord_dim)
-        backbone = instantiate(
-            model_cfg.backbone,
-            _recursive_=False,
-            context_channels=context_channels,
-        )
-    else:
-        backbone = instantiate(model_cfg.backbone, _recursive_=False)
+    )
+    context_channels = 4 if include_delta_ctx else int(data_cfg.coord_dim)
+    backbone = instantiate(
+        model_cfg.backbone,
+        _recursive_=False,
+        context_channels=context_channels,
+    )
     schedule = DDPMNoiseSchedule(
         timesteps=int(model_cfg.timesteps),
         beta_schedule=str(model_cfg.beta_schedule),
@@ -121,138 +113,66 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
             OmegaConf.select(ema_cfg, "use_num_updates", default=True)
         )
 
-    if model_name == "trajectory_completion_ddpm":
-        ctx_key = str(
-            OmegaConf.select(
-                model_cfg,
-                "context_key",
-                default=OmegaConf.select(
-                    data_cfg, "params.context_key", default="context"
-                ),
-            )
+    ctx_key = str(
+        OmegaConf.select(
+            model_cfg,
+            "context_key",
+            default=OmegaConf.select(
+                data_cfg, "params.context_key", default="context"
+            ),
         )
-        p_uncond = float(OmegaConf.select(model_cfg, "p_uncond", default=0.1))
-        guidance_scale = float(
-            OmegaConf.select(model_cfg, "guidance_scale", default=1.0)
+    )
+    mask_key = str(
+        OmegaConf.select(
+            model_cfg,
+            "mask_key",
+            default=OmegaConf.select(
+                data_cfg, "params.mask_key", default="obs_mask"
+            ),
         )
-        return TrajectoryCompletionDDPMInterface(
-            model=ddpm_model,
-            future_len=int(data_cfg.future_seq_len),
-            observed_len=int(data_cfg.observed_len),
-            full_seq_len=int(data_cfg.full_seq_len),
-            num_agents=int(data_cfg.num_agents),
-            coord_dim=int(data_cfg.coord_dim),
-            trajectory_key=traj_key,
-            context_key=ctx_key,
-            learning_rate=float(optim["learning_rate"]),
-            betas=tuple(optim.get("betas", (0.9, 0.999))),
-            weight_decay=float(optim.get("weight_decay", 0.0)),
-            parameterization=str(model_cfg.parameterization),
-            loss_type=str(model_cfg.loss_type),
-            court_width=court_w,
-            court_height=court_h,
-            val_logging_enabled=val_logging_enabled,
-            val_num_samples=val_num_samples,
-            log_every_n_val_epochs=log_every_n_val_epochs,
-            ema_enabled=ema_enabled,
-            ema_decay=ema_decay,
-            ema_use_num_updates=ema_use_num_updates,
-            p_uncond=p_uncond,
-            guidance_scale=guidance_scale,
-            sampling_method=sampling_method,
-            sampling_dpm=sampling_dpm,
+    )
+    pos0_key = str(
+        OmegaConf.select(
+            model_cfg,
+            "position_0_key",
+            default=OmegaConf.select(
+                data_cfg, "params.position_0_key", default="position_0"
+            ),
         )
-
-    if model_name == "trajectory_filling_ddpm":
-        ctx_key = str(
-            OmegaConf.select(
-                model_cfg,
-                "context_key",
-                default=OmegaConf.select(
-                    data_cfg, "params.context_key", default="context"
-                ),
-            )
+    )
+    p_uncond = float(OmegaConf.select(model_cfg, "p_uncond", default=0.1))
+    guidance_scale = float(
+        OmegaConf.select(model_cfg, "guidance_scale", default=1.0)
+    )
+    log_blend_trajectory_video = bool(
+        OmegaConf.select(model_cfg, "log_blend_trajectory_video", default=True)
+    )
+    full_t = int(data_cfg.full_seq_len)
+    delta_len = int(OmegaConf.select(data_cfg, "delta_len", default=full_t))
+    if delta_len != full_t:
+        raise ValueError(
+            f"data.delta_len ({delta_len}) must equal full_seq_len ({full_t})"
         )
-        mask_key = str(
-            OmegaConf.select(
-                model_cfg,
-                "mask_key",
-                default=OmegaConf.select(
-                    data_cfg, "params.mask_key", default="obs_mask"
-                ),
-            )
-        )
-        pos0_key = str(
-            OmegaConf.select(
-                model_cfg,
-                "position_0_key",
-                default=OmegaConf.select(
-                    data_cfg, "params.position_0_key", default="position_0"
-                ),
-            )
-        )
-        p_uncond = float(OmegaConf.select(model_cfg, "p_uncond", default=0.1))
-        guidance_scale = float(
-            OmegaConf.select(model_cfg, "guidance_scale", default=1.0)
-        )
-        log_blend_trajectory_video = bool(
-            OmegaConf.select(model_cfg, "log_blend_trajectory_video", default=True)
-        )
-        full_t = int(data_cfg.full_seq_len)
-        delta_len = int(OmegaConf.select(data_cfg, "delta_len", default=full_t))
-        if delta_len != full_t:
-            raise ValueError(
-                f"data.delta_len ({delta_len}) must equal full_seq_len ({full_t})"
-            )
-        fill = OmegaConf.select(data_cfg, "params.context_fill", default=[0.0, 0.0])
-        d_delta_fill = OmegaConf.select(
-            data_cfg, "params.delta_context_fill", default=[0.0, 0.0]
-        )
-        d_shift = OmegaConf.select(data_cfg, "params.delta_shift", default=[0.0, 0.0])
-        d_scale = OmegaConf.select(data_cfg, "params.delta_scale", default=[1.0, 1.0])
-        return TrajectoryFillingDDPMInterface(
-            model=ddpm_model,
-            seq_len=delta_len,
-            num_agents=int(data_cfg.num_agents),
-            coord_dim=int(data_cfg.coord_dim),
-            trajectory_key=traj_key,
-            context_key=ctx_key,
-            mask_key=mask_key,
-            position_0_key=pos0_key,
-            context_fill=list(fill),
-            delta_context_fill=list(d_delta_fill),
-            context_channels=context_channels,
-            delta_shift=list(d_shift),
-            delta_scale=list(d_scale),
-            learning_rate=float(optim["learning_rate"]),
-            betas=tuple(optim.get("betas", (0.9, 0.999))),
-            weight_decay=float(optim.get("weight_decay", 0.0)),
-            parameterization=str(model_cfg.parameterization),
-            loss_type=str(model_cfg.loss_type),
-            court_width=court_w,
-            court_height=court_h,
-            val_logging_enabled=val_logging_enabled,
-            val_num_samples=val_num_samples,
-            log_every_n_val_epochs=log_every_n_val_epochs,
-            ema_enabled=ema_enabled,
-            ema_decay=ema_decay,
-            ema_use_num_updates=ema_use_num_updates,
-            p_uncond=p_uncond,
-            guidance_scale=guidance_scale,
-            log_blend_trajectory_video=log_blend_trajectory_video,
-            sampling_method=sampling_method,
-            sampling_dpm=sampling_dpm,
-        )
-
-    if model_name != "trajectory_ddpm":
-        raise ValueError(f"Unknown model name: {model_name}")
-
-    return TrajectoryDDPMInterface(
+    fill = OmegaConf.select(data_cfg, "params.context_fill", default=[0.0, 0.0])
+    d_delta_fill = OmegaConf.select(
+        data_cfg, "params.delta_context_fill", default=[0.0, 0.0]
+    )
+    d_shift = OmegaConf.select(data_cfg, "params.delta_shift", default=[0.0, 0.0])
+    d_scale = OmegaConf.select(data_cfg, "params.delta_scale", default=[1.0, 1.0])
+    return TrajectoryFillingDDPMInterface(
         model=ddpm_model,
-        seq_len=int(data_cfg.seq_len),
+        seq_len=delta_len,
         num_agents=int(data_cfg.num_agents),
         coord_dim=int(data_cfg.coord_dim),
         trajectory_key=traj_key,
+        context_key=ctx_key,
+        mask_key=mask_key,
+        position_0_key=pos0_key,
+        context_fill=list(fill),
+        delta_context_fill=list(d_delta_fill),
+        context_channels=context_channels,
+        delta_shift=list(d_shift),
+        delta_scale=list(d_scale),
         learning_rate=float(optim["learning_rate"]),
         betas=tuple(optim.get("betas", (0.9, 0.999))),
         weight_decay=float(optim.get("weight_decay", 0.0)),
@@ -266,6 +186,9 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
         ema_enabled=ema_enabled,
         ema_decay=ema_decay,
         ema_use_num_updates=ema_use_num_updates,
+        p_uncond=p_uncond,
+        guidance_scale=guidance_scale,
+        log_blend_trajectory_video=log_blend_trajectory_video,
         sampling_method=sampling_method,
         sampling_dpm=sampling_dpm,
     )
@@ -366,7 +289,7 @@ def _resolve_logging_backend(
 
 @hydra.main(
     config_path="configs",
-    config_name="train_trajectory_ddpm",
+    config_name="train_trajectory_filling_ddpm",
     version_base=None,
 )
 def main(cfg: DictConfig) -> None:

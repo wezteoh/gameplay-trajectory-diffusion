@@ -1,4 +1,4 @@
-"""DDPM trajectory sampling shared by ``sample_trajectory_ddpm`` and metric eval."""
+"""DDPM trajectory sampling shared by ``sample_trajectory_ddpm.py`` and metric eval."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from src.utils.trajectory_coords import denormalize_delta
 
 
 def model_name(cfg: DictConfig) -> str:
-    return str(OmegaConf.select(cfg, "model.name", default="trajectory_ddpm"))
+    return str(OmegaConf.select(cfg, "model.name", default="trajectory_filling_ddpm"))
 
 
 def sampling_options_from_cfg(cfg: DictConfig | None) -> tuple[str, dict[str, Any]]:
@@ -188,117 +188,76 @@ def sample_batch_multi_path(
     if dpm_config is not None:
         dpm_d = {**dpm_d, **dpm_config}
 
-    if mname == "trajectory_ddpm":
-        bsz = next(iter(batch.values())).shape[0]
-        x, _ = sample_with_trace(
-            module.model,
-            batch_size=bsz * p,
-            seq_len=int(module.seq_len),
-            num_agents=int(module.num_agents),
-            coord_dim=int(module.coord_dim),
-            device=device,
-            verbose=verbose,
-            sampler=sm,
-            dpm_config=dpm_d,
+    if mname != "trajectory_filling_ddpm":
+        raise ValueError(
+            f"Unsupported model.name for sampling: {mname!r}; "
+            "expected 'trajectory_filling_ddpm'"
         )
-        return rearrange(x, "(b p) t a c -> b p t a c", b=bsz, p=p)
 
     bsz = next(iter(batch.values())).shape[0]
     ctx_key = str(module.context_key)
-
-    if mname == "trajectory_completion_ddpm":
-        past = batch[ctx_key]
-        gs = (
-            float(module.guidance_scale)
-            if guidance_scale_override is None
-            else float(guidance_scale_override)
-        )
-        past_rep = past.repeat_interleave(p, dim=0)
-        dtype = past.dtype
-        future_hat, _ = sample_with_trace(
-            module.model,
-            batch_size=bsz * p,
-            seq_len=int(module.future_len),
-            num_agents=int(module.num_agents),
-            coord_dim=int(module.coord_dim),
-            device=device,
-            context=past_rep,
-            guidance_scale=gs,
-            dtype=dtype,
-            verbose=verbose,
-            sampler=sm,
-            dpm_config=dpm_d,
-        )
-        anchor = past_rep[:, -1]
-        future_abs = future_hat + anchor.unsqueeze(1)
-        x = torch.cat([past_rep, future_abs], dim=1)
-        return rearrange(x, "(b p) t a c -> b p t a c", b=bsz, p=p)
-
-    if mname == "trajectory_filling_ddpm":
-        mask_key = str(module.mask_key)
-        pos_key = str(module.position_0_key)
-        context = batch[ctx_key]
-        obs_mask = batch[mask_key].to(dtype=context.dtype)
-        pos0 = batch[pos_key]
-        dtype = context.dtype
-        gs = (
-            float(module.guidance_scale)
-            if guidance_scale_override is None
-            else float(guidance_scale_override)
-        )
-        context_rep = context.repeat_interleave(p, dim=0)
-        obs_rep = obs_mask.repeat_interleave(p, dim=0)
-        pos0_rep = pos0.repeat_interleave(p, dim=0)
-        fill = module._context_fill_brc.to(device=device, dtype=dtype).expand(
-            bsz * p,
-            int(module.seq_len),
-            int(module.num_agents),
-            int(module.context_channels),
-        )
-        null_mask = torch.zeros(
-            bsz * p,
-            int(module.seq_len),
-            int(module.num_agents),
-            device=device,
-            dtype=dtype,
-        )
-        deltas_hat, _ = sample_with_trace(
-            module.model,
-            batch_size=bsz * p,
-            seq_len=int(module.seq_len),
-            num_agents=int(module.num_agents),
-            coord_dim=int(module.coord_dim),
-            device=device,
-            context=context_rep,
-            obs_mask=obs_rep,
-            guidance_scale=gs,
-            dtype=dtype,
-            verbose=verbose,
-            cfg_null_context=fill,
-            cfg_null_mask=null_mask,
-            sampler=sm,
-            dpm_config=dpm_d,
-        )
-        d_raw = denormalize_delta(
-            deltas_hat,
-            module._delta_shift,
-            module._delta_scale,
-        )
-        traj_key = str(module.trajectory_key)
-        x0 = batch[traj_key]
-        x0_rep = x0.repeat_interleave(p, dim=0)
-        d_gt_raw = denormalize_delta(
-            x0_rep,
-            module._delta_shift,
-            module._delta_scale,
-        )
-        traj_gt = pos0_rep.unsqueeze(1) + torch.cumsum(d_gt_raw, dim=1)
-        x = _blend_traj_rollout_from_last_observed(
-            pos0_rep,
-            d_raw,
-            traj_gt,
-            obs_rep,
-        )
-        return rearrange(x, "(b p) t a c -> b p t a c", b=bsz, p=p)
-
-    raise ValueError(f"Unsupported model.name for sampling: {mname!r}")
+    mask_key = str(module.mask_key)
+    pos_key = str(module.position_0_key)
+    context = batch[ctx_key]
+    obs_mask = batch[mask_key].to(dtype=context.dtype)
+    pos0 = batch[pos_key]
+    dtype = context.dtype
+    gs = (
+        float(module.guidance_scale)
+        if guidance_scale_override is None
+        else float(guidance_scale_override)
+    )
+    context_rep = context.repeat_interleave(p, dim=0)
+    obs_rep = obs_mask.repeat_interleave(p, dim=0)
+    pos0_rep = pos0.repeat_interleave(p, dim=0)
+    fill = module._context_fill_brc.to(device=device, dtype=dtype).expand(
+        bsz * p,
+        int(module.seq_len),
+        int(module.num_agents),
+        int(module.context_channels),
+    )
+    null_mask = torch.zeros(
+        bsz * p,
+        int(module.seq_len),
+        int(module.num_agents),
+        device=device,
+        dtype=dtype,
+    )
+    deltas_hat, _ = sample_with_trace(
+        module.model,
+        batch_size=bsz * p,
+        seq_len=int(module.seq_len),
+        num_agents=int(module.num_agents),
+        coord_dim=int(module.coord_dim),
+        device=device,
+        context=context_rep,
+        obs_mask=obs_rep,
+        guidance_scale=gs,
+        dtype=dtype,
+        verbose=verbose,
+        cfg_null_context=fill,
+        cfg_null_mask=null_mask,
+        sampler=sm,
+        dpm_config=dpm_d,
+    )
+    d_raw = denormalize_delta(
+        deltas_hat,
+        module._delta_shift,
+        module._delta_scale,
+    )
+    traj_key = str(module.trajectory_key)
+    x0 = batch[traj_key]
+    x0_rep = x0.repeat_interleave(p, dim=0)
+    d_gt_raw = denormalize_delta(
+        x0_rep,
+        module._delta_shift,
+        module._delta_scale,
+    )
+    traj_gt = pos0_rep.unsqueeze(1) + torch.cumsum(d_gt_raw, dim=1)
+    x = _blend_traj_rollout_from_last_observed(
+        pos0_rep,
+        d_raw,
+        traj_gt,
+        obs_rep,
+    )
+    return rearrange(x, "(b p) t a c -> b p t a c", b=bsz, p=p)

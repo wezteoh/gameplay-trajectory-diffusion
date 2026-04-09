@@ -1,9 +1,6 @@
-"""Generate trajectory DDPM samples from a Lightning checkpoint.
+"""Generate masked trajectory-filling DDPM samples from a Lightning checkpoint.
 
-Supports all training task types: unconditional generation (trajectory_ddpm),
-future completion (trajectory_completion_ddpm), and masked filling
-(trajectory_filling_ddpm). Task behavior is taken from ``model.name`` in the
-checkpoint's ``config.yaml``.
+Expects ``model.name: trajectory_filling_ddpm`` in the checkpoint ``config.yaml``.
 """
 
 from __future__ import annotations
@@ -127,8 +124,8 @@ def _parse_args() -> argparse.Namespace:
         "--filling-blend-videos",
         action="store_true",
         help=(
-            "For trajectory_filling_ddpm only: also write trajectory_*_blend.mp4 "
-            "(GT at observed steps + predicted deltas elsewhere), like validation."
+            "Also write trajectory_*_blend.mp4 (GT at observed steps + predicted "
+            "deltas elsewhere), like validation."
         ),
     )
     p.add_argument(
@@ -136,8 +133,8 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Override classifier-free guidance scale for conditional tasks "
-            "(completion/filling). If omitted, uses value from checkpoint config."
+            "Override classifier-free guidance scale. "
+            "If omitted, uses value from checkpoint config."
         ),
     )
     p.add_argument(
@@ -194,51 +191,27 @@ def _merge_data_cfg(cfg: DictConfig, data: DictConfig) -> None:
 
 
 def _validate_task_shapes(cfg: DictConfig) -> None:
-    """Ensure resolved data.* matches model.backbone.* for the checkpoint's task."""
+    """Ensure resolved data.* matches model.backbone.* for trajectory filling."""
     mname = _model_name(cfg)
+    if mname != "trajectory_filling_ddpm":
+        raise ValueError(
+            f"Unsupported model.name for sampling: {mname!r}; "
+            "expected 'trajectory_filling_ddpm'"
+        )
     bb = cfg.model.backbone
     d = cfg.data
-    if mname == "trajectory_completion_ddpm":
-        if int(bb.future_seq_len) != int(d.future_seq_len):
-            raise ValueError(
-                f"data.future_seq_len={d.future_seq_len} does not match "
-                f"model.backbone.future_seq_len={bb.future_seq_len}."
-            )
-        if int(bb.past_seq_len) != int(d.observed_len):
-            raise ValueError(
-                f"data.observed_len={d.observed_len} does not match "
-                f"model.backbone.past_seq_len={bb.past_seq_len}."
-            )
-        for key in ("num_agents", "coord_dim"):
-            if int(bb[key]) != int(d[key]):
-                raise ValueError(
-                    f"data.{key}={d[key]} does not match model.backbone.{key}="
-                    f"{bb[key]}."
-                )
-        return
-    if mname == "trajectory_filling_ddpm":
-        full_t = int(d.full_seq_len)
-        delta_len = int(OmegaConf.select(d, "delta_len", default=full_t))
-        if int(bb.max_seq_len) != delta_len:
-            raise ValueError(
-                f"data delta length ({delta_len}) does not match "
-                f"model.backbone.max_seq_len={bb.max_seq_len}."
-            )
-        for key in ("num_agents", "coord_dim"):
-            if int(bb[key]) != int(d[key]):
-                raise ValueError(
-                    f"data.{key}={d[key]} does not match model.backbone.{key}="
-                    f"{bb[key]}."
-                )
-        return
-    if mname != "trajectory_ddpm":
-        raise ValueError(f"Unknown model.name for sampling: {mname!r}")
-    for key in ("seq_len", "num_agents", "coord_dim"):
+    full_t = int(d.full_seq_len)
+    delta_len = int(OmegaConf.select(d, "delta_len", default=full_t))
+    if int(bb.max_seq_len) != delta_len:
+        raise ValueError(
+            f"data delta length ({delta_len}) does not match "
+            f"model.backbone.max_seq_len={bb.max_seq_len}."
+        )
+    for key in ("num_agents", "coord_dim"):
         if int(bb[key]) != int(d[key]):
             raise ValueError(
                 f"data.{key}={d[key]} does not match model.backbone.{key}="
-                f"{bb[key]} from the checkpoint config. "
-                "Choose a --data preset that matches the trained shapes."
+                f"{bb[key]}."
             )
 
 
@@ -309,138 +282,86 @@ def _sample_for_task(
 ]:
     """Run sampling; returns tensor for visualization (normalized positions) and metadata."""
     mname = _model_name(cfg)
+    if mname != "trajectory_filling_ddpm":
+        raise ValueError(
+            f"Unsupported model.name: {mname!r}; expected 'trajectory_filling_ddpm'"
+        )
     meta: dict[str, Any] = {"task": mname}
     sm, dpm_d = sampling_options_from_cfg(cfg)
-
-    if mname == "trajectory_ddpm":
-        x, traces = sample_with_trace(
-            module.model,
-            batch_size=n,
-            seq_len=int(module.seq_len),
-            num_agents=int(module.num_agents),
-            coord_dim=int(module.coord_dim),
-            device=device,
-            verbose=verbose,
-            trace_every=trace_every,
-            sampler=sm,
-            dpm_config=dpm_d,
-        )
-        meta["seq_len"] = int(module.seq_len)
-        meta["evolution_traces"] = traces
-        return x, meta
 
     _ensure_nba_data_root(cfg)
     dm = _build_datamodule(cfg.data)
     batch = _val_batch_first_n(dm, n, device)
 
-    if mname == "trajectory_completion_ddpm":
-        ctx_key = str(module.context_key)
-        past = batch[ctx_key]
-        gs = (
-            float(module.guidance_scale)
-            if guidance_scale_override is None
-            else float(guidance_scale_override)
-        )
-        future_hat, future_traces = sample_with_trace(
-            module.model,
-            batch_size=n,
-            seq_len=int(module.future_len),
-            num_agents=int(module.num_agents),
-            coord_dim=int(module.coord_dim),
-            device=device,
-            context=past,
-            guidance_scale=gs,
-            dtype=past.dtype,
-            verbose=verbose,
-            trace_every=trace_every,
-            sampler=sm,
-            dpm_config=dpm_d,
-        )
-        anchor = past[:, -1]
-        future_abs = future_hat + anchor.unsqueeze(1)
-        x = torch.cat([past, future_abs], dim=1)
-        evo: list[tuple[int, torch.Tensor]] = []
-        for step, ft in future_traces:
-            evo.append((step, torch.cat([past, ft + anchor.unsqueeze(1)], dim=1)))
-        meta["observed_len"] = int(module.observed_len)
-        meta["future_len"] = int(module.future_len)
-        meta["full_seq_len"] = int(module.full_seq_len)
-        meta["seq_len"] = int(module.full_seq_len)
-        meta["evolution_traces"] = evo
-        return x, meta
-
-    if mname == "trajectory_filling_ddpm":
-        ctx_key = str(module.context_key)
-        mask_key = str(module.mask_key)
-        pos_key = str(module.position_0_key)
-        context = batch[ctx_key]
-        obs_mask = batch[mask_key].to(dtype=context.dtype)
-        pos0 = batch[pos_key]
-        dtype = context.dtype
-        gs = (
-            float(module.guidance_scale)
-            if guidance_scale_override is None
-            else float(guidance_scale_override)
-        )
-        fill = module._context_fill_brc.to(device=device, dtype=dtype).expand(
-            n, int(module.seq_len), int(module.num_agents), int(module.context_channels)
-        )
-        null_mask = torch.zeros(
-            n,
-            int(module.seq_len),
-            int(module.num_agents),
-            device=device,
-            dtype=dtype,
-        )
-        deltas_hat, delta_traces = sample_with_trace(
-            module.model,
-            batch_size=n,
-            seq_len=int(module.seq_len),
-            num_agents=int(module.num_agents),
-            coord_dim=int(module.coord_dim),
-            device=device,
-            context=context,
-            obs_mask=obs_mask,
-            guidance_scale=gs,
-            dtype=dtype,
-            verbose=verbose,
-            cfg_null_context=fill,
-            cfg_null_mask=null_mask,
-            trace_every=trace_every,
-            sampler=sm,
-            dpm_config=dpm_d,
-        )
-        d_raw = denormalize_delta(
-            deltas_hat,
+    ctx_key = str(module.context_key)
+    mask_key = str(module.mask_key)
+    pos_key = str(module.position_0_key)
+    context = batch[ctx_key]
+    obs_mask = batch[mask_key].to(dtype=context.dtype)
+    pos0 = batch[pos_key]
+    dtype = context.dtype
+    gs = (
+        float(module.guidance_scale)
+        if guidance_scale_override is None
+        else float(guidance_scale_override)
+    )
+    fill = module._context_fill_brc.to(device=device, dtype=dtype).expand(
+        n, int(module.seq_len), int(module.num_agents), int(module.context_channels)
+    )
+    null_mask = torch.zeros(
+        n,
+        int(module.seq_len),
+        int(module.num_agents),
+        device=device,
+        dtype=dtype,
+    )
+    deltas_hat, delta_traces = sample_with_trace(
+        module.model,
+        batch_size=n,
+        seq_len=int(module.seq_len),
+        num_agents=int(module.num_agents),
+        coord_dim=int(module.coord_dim),
+        device=device,
+        context=context,
+        obs_mask=obs_mask,
+        guidance_scale=gs,
+        dtype=dtype,
+        verbose=verbose,
+        cfg_null_context=fill,
+        cfg_null_mask=null_mask,
+        trace_every=trace_every,
+        sampler=sm,
+        dpm_config=dpm_d,
+    )
+    d_raw = denormalize_delta(
+        deltas_hat,
+        module._delta_shift,
+        module._delta_scale,
+    )
+    x = pos0.unsqueeze(1) + torch.cumsum(d_raw, dim=1)
+    evo: list[tuple[int, torch.Tensor]] = []
+    for step, d_hat in delta_traces:
+        d_raw_i = denormalize_delta(
+            d_hat,
             module._delta_shift,
             module._delta_scale,
         )
-        x = pos0.unsqueeze(1) + torch.cumsum(d_raw, dim=1)
-        evo: list[tuple[int, torch.Tensor]] = []
-        for step, d_hat in delta_traces:
-            d_raw_i = denormalize_delta(
-                d_hat,
-                module._delta_shift,
-                module._delta_scale,
-            )
-            evo.append((step, pos0.unsqueeze(1) + torch.cumsum(d_raw_i, dim=1)))
-        meta["seq_len"] = int(module.seq_len)
-        meta["blend_extra"] = None
-        meta["evolution_traces"] = evo
-        if filling_blend:
-            x0_true = batch[str(module.trajectory_key)]
-            d_gt_raw = denormalize_delta(
-                x0_true,
-                module._delta_shift,
-                module._delta_scale,
-            )
-            traj_gt = pos0.unsqueeze(1) + torch.cumsum(d_gt_raw, dim=1)
-            meta["blend_extra"] = _blend_traj_rollout_from_last_observed(
-                pos0, d_raw, traj_gt, obs_mask
-            )
-        return x, meta
-
-    raise ValueError(f"Unsupported model.name: {mname!r}")
+        evo.append((step, pos0.unsqueeze(1) + torch.cumsum(d_raw_i, dim=1)))
+    meta["seq_len"] = int(module.seq_len)
+    meta["blend_extra"] = None
+    meta["evolution_traces"] = evo
+    if filling_blend:
+        x0_true = batch[str(module.trajectory_key)]
+        d_gt_raw = denormalize_delta(
+            x0_true,
+            module._delta_shift,
+            module._delta_scale,
+        )
+        traj_gt = pos0.unsqueeze(1) + torch.cumsum(d_gt_raw, dim=1)
+        meta["blend_extra"] = _blend_traj_rollout_from_last_observed(
+            pos0, d_raw, traj_gt, obs_mask
+        )
+    return x, meta
 
 
 def _resolve_device(cfg: DictConfig, force_cpu: bool) -> torch.device:
@@ -565,9 +486,6 @@ def main() -> None:
                 court_width=court_w,
                 court_height=court_h,
             )
-            if task == "trajectory_completion_ddpm":
-                save_kw["observed_len"] = int(sample_meta["observed_len"])
-                save_kw["future_len"] = int(sample_meta["future_len"])
             np.savez(path, **save_kw)
 
     blend_np = None
@@ -580,11 +498,7 @@ def main() -> None:
             frames = create_frames_from_trajectory(court_xy, "basketball")
             video_path = os.path.join(out_dir, f"trajectory_{i:04d}.mp4")
             create_video_from_frames(frames, video_path, fps=10)
-            if (
-                blend_np is not None
-                and args.filling_blend_videos
-                and task == "trajectory_filling_ddpm"
-            ):
+            if blend_np is not None and args.filling_blend_videos:
                 court_b = denormalize_court_xy_numpy(blend_np[i], court_w, court_h)
                 frames_b = create_frames_from_trajectory(court_b, "basketball")
                 blend_path = os.path.join(out_dir, f"trajectory_{i:04d}_blend.mp4")
