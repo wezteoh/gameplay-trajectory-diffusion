@@ -14,6 +14,7 @@ from src.utils.drawing import (
     create_frames_from_trajectory,
     create_video_from_frames,
     frames_to_tb_video_tensor,
+    render_basketball_observed_gt_panel,
 )
 from src.utils.trajectory_coords import denormalize_court_xy_numpy, denormalize_delta
 from torch.optim import Optimizer
@@ -172,6 +173,7 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
                 f"got {pm!r}"
             )
         self.val_traj_metrics_prediction_mode = pm
+        self._wandb_reference_logged = False
 
         cf = list(context_fill)
         if len(cf) != 2:
@@ -309,6 +311,7 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
     def on_validation_epoch_end(self) -> None:
         try:
             self._maybe_log_val_trajectory_metrics()
+            self._maybe_log_wandb_reference_visuals_once()
             if (
                 self.val_logging_enabled
                 and isinstance(self.logger, (WandbLogger, TensorBoardLogger))
@@ -465,6 +468,84 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
         return finalize_metric_state(state)
 
     @torch.no_grad()
+    def _maybe_log_wandb_reference_visuals_once(self) -> None:
+        """Log GT videos and masked-observable GT panels once (WandB, step=0)."""
+        if self._wandb_reference_logged:
+            return
+        if not isinstance(self.logger, WandbLogger):
+            return
+        if not self.val_logging_enabled:
+            return
+        if self.trainer is None or not self.trainer.is_global_zero:
+            return
+        if self.val_num_samples <= 0:
+            return
+        if getattr(self.trainer, "sanity_checking", False):
+            return
+        dm = self.trainer.datamodule
+        if dm is None:
+            return
+
+        was_training = self.training
+        self.eval()
+        loader = dm.val_dataloader()
+        batch = next(iter(loader))
+        batch = {
+            k: v.to(self.device) if torch.is_tensor(v) else v for k, v in batch.items()
+        }
+        vs = self.val_num_samples
+        pos0 = batch[self.position_0_key][:vs]
+        obs_mask = batch[self.mask_key][:vs]
+        x0_true = batch[self.trajectory_key][:vs]
+        d_gt_raw = denormalize_delta(
+            x0_true,
+            self._delta_shift,
+            self._delta_scale,
+        )
+        traj_gt = pos0.unsqueeze(1) + torch.cumsum(d_gt_raw, dim=1)
+        if was_training:
+            self.train()
+
+        os.makedirs("tmp", exist_ok=True)
+        # WandbLogger defines all metrics against ``trainer/global_step`` (not wandb's
+        # default step). Same dict shape as WandbLogger.log_metrics so media shows up.
+        ref_step = 0
+        log_payload: dict[str, Any] = {}
+        n = traj_gt.shape[0]
+        for i in range(n):
+            court_xy_gt = denormalize_court_xy_numpy(
+                traj_gt[i].float().cpu().numpy(),
+                self.court_width,
+                self.court_height,
+            )
+            frames_gt = create_frames_from_trajectory(court_xy_gt, "basketball")
+            stem_gt = f"gt_reference_{i}.mp4" if n > 1 else "gt_reference.mp4"
+            video_path_gt = os.path.join("tmp", stem_gt)
+            create_video_from_frames(frames_gt, video_path_gt, fps=10)
+            key_gt = (
+                "reference_gt/gt_reference"
+                if n == 1
+                else f"reference_gt/gt_reference_{i}"
+            )
+            log_payload[key_gt] = wandb.Video(video_path_gt, format="mp4")
+
+            panel = render_basketball_observed_gt_panel(
+                court_xy_gt,
+                obs_mask[i].float().cpu().numpy(),
+            )
+            key_panel = (
+                "reference_mask/masked_gt"
+                if n == 1
+                else f"reference_mask/masked_gt_{i}"
+            )
+            log_payload[key_panel] = wandb.Image(panel)
+
+        self.logger.experiment.log(
+            {**log_payload, "trainer/global_step": int(ref_step)}
+        )
+        self._wandb_reference_logged = True
+
+    @torch.no_grad()
     def _log_sample_trajectory_videos(self) -> None:
         was_training = self.training
         self.eval()
@@ -589,7 +670,9 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
                         fps=10,
                     )
         if use_wandb and log_payload:
-            self.logger.experiment.log(log_payload, step=self.global_step)
+            self.logger.experiment.log(
+                {**log_payload, "trainer/global_step": int(self.global_step)}
+            )
 
     def load_state_dict(
         self,

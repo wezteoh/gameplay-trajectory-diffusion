@@ -442,14 +442,20 @@ def main(cfg: DictConfig) -> None:
 
     ckpt_cfg = OmegaConf.select(cfg, "trainer.checkpoint", default=None)
     if ckpt_cfg is None:
-        monitor_raw, mode = "val/loss", "min"
+        monitor_raw, mode, save_top_k = "val/loss", "min", 2
     else:
         monitor_raw = str(OmegaConf.select(ckpt_cfg, "monitor", default="val/loss"))
         mode = str(OmegaConf.select(ckpt_cfg, "mode", default="min"))
+        save_top_k = int(OmegaConf.select(ckpt_cfg, "save_top_k", default=2))
     monitor = _resolve_checkpoint_monitor(monitor_raw)
     if mode not in ("min", "max"):
         raise ValueError(
             f"trainer.checkpoint.mode must be 'min' or 'max', got {mode!r}"
+        )
+    if save_top_k < -1:
+        raise ValueError(
+            "trainer.checkpoint.save_top_k must be -1 (keep all) or >= 0, "
+            f"got {save_top_k}"
         )
     filename = _checkpoint_filename_template(monitor)
     callbacks = [
@@ -458,7 +464,7 @@ def main(cfg: DictConfig) -> None:
             dirpath=os.path.join("checkpoints", checkpoint_relpath),
             monitor=monitor,
             mode=mode,
-            save_top_k=2,
+            save_top_k=save_top_k,
             save_last=True,
             filename=filename,
             auto_insert_metric_name=False,

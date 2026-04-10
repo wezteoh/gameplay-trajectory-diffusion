@@ -54,6 +54,7 @@ trainer:
   checkpoint:
     monitor: val/loss
     mode: min
+    save_top_k: 2
 
   val_trajectory_metrics:
     enabled: false

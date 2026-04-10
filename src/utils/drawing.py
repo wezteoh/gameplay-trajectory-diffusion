@@ -293,7 +293,9 @@ class Court:
 
         self.court_type = court_type
         self.units = units
-        self.court_parameters = _get_court_params_in_desired_units(self.court_type, self.units)
+        self.court_parameters = _get_court_params_in_desired_units(
+            self.court_type, self.units
+        )
 
         if origin == "center":
             self.origin = np.array([0.0, 0.0])
@@ -502,14 +504,22 @@ class Court:
         angle_b = 12.3415314172  # Angle 2 for lower FT line
 
         if half is None:
-            ax.set_xlim(origin_shift_x - court_x / 2 - pad, origin_shift_x + court_x / 2 + pad)
-            ax.set_ylim(origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad)
+            ax.set_xlim(
+                origin_shift_x - court_x / 2 - pad, origin_shift_x + court_x / 2 + pad
+            )
+            ax.set_ylim(
+                origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad
+            )
         elif half == "l":
             ax.set_xlim(origin_shift_x - court_x / 2 - pad, origin_shift_x + cf)
-            ax.set_ylim(origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad)
+            ax.set_ylim(
+                origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad
+            )
         elif half == "r":
             ax.set_xlim(origin_shift_x - cf, origin_shift_x + court_x / 2 + pad)
-            ax.set_ylim(origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad)
+            ax.set_ylim(
+                origin_shift_y - court_y / 2 - pad, origin_shift_y + court_y / 2 + pad
+            )
 
         # Draw the main court rectangle
         self._draw_rectangle(
@@ -560,10 +570,14 @@ class Court:
 
         # Draw the hoops
         left_hoop_x = (
-            origin_shift_x - court_x / 2 + self.court_parameters["hoop_distance_from_edge"]
+            origin_shift_x
+            - court_x / 2
+            + self.court_parameters["hoop_distance_from_edge"]
         )
         right_hoop_x = (
-            origin_shift_x + court_x / 2 - self.court_parameters["hoop_distance_from_edge"]
+            origin_shift_x
+            + court_x / 2
+            - self.court_parameters["hoop_distance_from_edge"]
         )
         # Left side
         if half is None or half == "l":
@@ -869,7 +883,9 @@ class Court:
 
         # Draw three point areas
         # Draw the arcs arcs
-        arc_diameter = self.court_parameters["three_point_arc_diameter"] - line_width / 2
+        arc_diameter = (
+            self.court_parameters["three_point_arc_diameter"] - line_width / 2
+        )
         arc_angle = self.court_parameters["three_point_arc_angle"]
         # Left arc
         if half is None or half == "l":
@@ -1015,14 +1031,22 @@ class Court:
         cf = line_width / 2
 
         if half is None:
-            ax.set_ylim(origin_shift_x - court_x / 2 - pad, origin_shift_x + court_x / 2 + pad)
-            ax.set_xlim(-origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad)
+            ax.set_ylim(
+                origin_shift_x - court_x / 2 - pad, origin_shift_x + court_x / 2 + pad
+            )
+            ax.set_xlim(
+                -origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad
+            )
         elif half == "d":
             ax.set_ylim(origin_shift_x - court_x / 2 - pad, origin_shift_x + cf)
-            ax.set_xlim(-origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad)
+            ax.set_xlim(
+                -origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad
+            )
         elif half == "u":
             ax.set_ylim(origin_shift_x - cf, origin_shift_x + court_x / 2 + pad)
-            ax.set_xlim(-origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad)
+            ax.set_xlim(
+                -origin_shift_y - court_y / 2 - pad, -origin_shift_y + court_y / 2 + pad
+            )
 
         # Draw the main court rectangle
         self._draw_rectangle(
@@ -1073,10 +1097,14 @@ class Court:
 
         # Draw the hoops
         left_hoop_x = (
-            origin_shift_x - court_x / 2 + self.court_parameters["hoop_distance_from_edge"]
+            origin_shift_x
+            - court_x / 2
+            + self.court_parameters["hoop_distance_from_edge"]
         )
         right_hoop_x = (
-            origin_shift_x + court_x / 2 - self.court_parameters["hoop_distance_from_edge"]
+            origin_shift_x
+            + court_x / 2
+            - self.court_parameters["hoop_distance_from_edge"]
         )
         # Left side
         if half is None or half == "d":
@@ -1383,7 +1411,9 @@ class Court:
 
         # Draw three point areas
         # Draw the arcs arcs
-        arc_diameter = self.court_parameters["three_point_arc_diameter"] - line_width / 2
+        arc_diameter = (
+            self.court_parameters["three_point_arc_diameter"] - line_width / 2
+        )
         arc_angle = self.court_parameters["three_point_arc_angle"]
         # Left arc
         if half is None or half == "d":
@@ -1658,6 +1688,85 @@ def _fade_line(ax, xy, color, lw=2.2, alpha_min=0.15, alpha_max=1.0, z=3):
     ax.add_collection(lc)
 
 
+def render_basketball_observed_gt_panel(
+    trajectory: np.ndarray,
+    obs_mask: np.ndarray,
+    *,
+    trace_lw: float = 3.5,
+) -> np.ndarray:
+    """
+    Single static court image: per agent, faded GT polyline from t=0 through the last
+    observed timestep (``obs_mask[t, a] >= 0.5``). Agents with no observed steps are
+    skipped.
+
+    ``trajectory`` is ``(T, N, 2)`` in court units (feet). ``obs_mask`` is ``(T, N)``.
+    """
+    traj = np.asarray(trajectory, dtype=float)
+    mask = np.asarray(obs_mask, dtype=float)
+    if traj.ndim != 3 or traj.shape[-1] != 2:
+        raise ValueError(f"Expected trajectory (T, N, 2), got shape {traj.shape}")
+    if mask.shape != traj.shape[:2]:
+        raise ValueError(
+            f"obs_mask shape {mask.shape} does not match trajectory "
+            f"(T, N) {traj.shape[:2]}"
+        )
+    t_len, n_ent, _ = traj.shape
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.5, 4), dpi=32)
+    court = Court(court_type="nba", origin="bottom-left", units="ft")
+    court.draw(ax=ax, showaxis=False)
+
+    def _draw_entity(entity_idx: int, color: tuple, z: int) -> None:
+        if entity_idx < 0 or entity_idx >= n_ent:
+            return
+        observed = mask[:, entity_idx] >= 0.5
+        if not np.any(observed):
+            return
+        t_end = int(np.flatnonzero(observed)[-1])
+        up_to = t_end + 1
+        xy = traj[0:up_to, entity_idx, :]
+        if xy.shape[0] >= 2:
+            _fade_line(
+                ax,
+                xy,
+                color,
+                lw=trace_lw,
+                alpha_min=0.22,
+                alpha_max=1.0,
+                z=z,
+            )
+        else:
+            ax.scatter(
+                [xy[0, 0]],
+                [xy[0, 1]],
+                s=36,
+                c=[color],
+                edgecolors="white",
+                linewidths=0.9,
+                zorder=z + 1,
+            )
+
+    for i in range(min(5, n_ent)):
+        _draw_entity(i, COLOR_HOME, z=3)
+    for i in range(5, min(10, n_ent)):
+        _draw_entity(i, COLOR_AWAY, z=3)
+    for i in range(10, n_ent):
+        _draw_entity(i, COLOR_BALL, z=5)
+
+    fig.canvas.draw()
+    if hasattr(fig.canvas, "buffer_rgba"):
+        rgba = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    elif hasattr(fig.canvas, "tostring_argb"):
+        argb = np.asarray(fig.canvas.tostring_argb(), dtype=np.uint8)
+        rgba = argb[..., [1, 2, 3, 0]]
+    else:
+        raise RuntimeError("Matplotlib canvas has no buffer_rgba or tostring_argb")
+    rgb = rgba[..., :3]
+
+    plt.close(fig)
+    return rgb
+
+
 def create_basketball_frame(
     trajectory: np.ndarray,
     frame_idx: int,
@@ -1827,7 +1936,9 @@ def create_frames_from_trajectory(
     traj = np.asarray(trajectory)
     if game == "basketball":
         for t in range(traj.shape[0]):
-            frames.append(create_basketball_frame(traj, t, ball_trace=basketball_ball_trace))
+            frames.append(
+                create_basketball_frame(traj, t, ball_trace=basketball_ball_trace)
+            )
         return frames
     for pts in trajectory:
         if game == "soccer":

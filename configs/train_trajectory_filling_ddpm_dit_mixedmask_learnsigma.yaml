@@ -1,5 +1,5 @@
 defaults:
-  - data: trajectory_nba_filling
+  - data: trajectory_nba_filling_mixedmask
   - model: trajectory_filling_ddpm_dit_learnsigma
   - _self_
 
@@ -13,7 +13,7 @@ wandb:
   enabled: true
   project: trajectory-filling-ddpm
   entity: null
-  name: dit-learnsigma-lr=1e-3
+  name: dit-learnsigma-mixedmask-lr=1e-4
   save_dir: ./wandb
   log_model: false
 
@@ -25,7 +25,7 @@ logging:
 
 trainer:
   lightning:
-    max_epochs: 2000
+    max_epochs: 1500
     accelerator: auto
     devices: 1
     precision: 32
@@ -38,11 +38,11 @@ trainer:
 
   val_logging:
     enabled: true
-    num_samples: 5
+    num_samples: 6
     log_every_n_val_epochs: 1
 
   optim:
-    learning_rate: 0.001
+    learning_rate: 0.0001
     betas: [0.9, 0.999]
     weight_decay: 0.0
 
@@ -52,17 +52,17 @@ trainer:
     use_num_updates: true
 
   checkpoint:
-    monitor: val/jade_min_20frames
+    monitor: val/jade_min_30frames
     mode: min
-    save_top_k: 2
+    save_top_k: 4
 
   val_trajectory_metrics:
     enabled: true
     max_samples: 512
     every_n_val_epochs: 1
     num_paths: 20
-    horizon_stride: 20
-    metrics_start_t: 10
+    horizon_stride: 30
+    metrics_start_t: 0
     prediction_mode: pure
     guidance_scale_override: 2.0
     verbose: false
