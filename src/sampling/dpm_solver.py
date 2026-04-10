@@ -1622,14 +1622,20 @@ def sample_trajectory_dpm_solver(
         )
     inv_n = 1.0 / float(n_train)
 
+    def _eps_only(pred: torch.Tensor) -> torch.Tensor:
+        if getattr(model, "learn_sigma", False):
+            c = pred.shape[-1] // 2
+            return pred[..., :c]
+        return pred
+
     def trajectory_eps_fn(x_in: torch.Tensor, t_continuous: torch.Tensor) -> torch.Tensor:
         t_model = (t_continuous - inv_n) * float(n_train)
         t_model = torch.clamp(t_model, 0.0, float(n_train - 1))
         if use_cfg:
             eps_u = model._call_backbone(x_in, t_model, null_ctx, null_m)
             eps_c = model._call_backbone(x_in, t_model, context, obs_mask)
-            return eps_u + gs * (eps_c - eps_u)
-        return model._call_backbone(x_in, t_model, context, obs_mask)
+            return _eps_only(eps_u + gs * (eps_c - eps_u))
+        return _eps_only(model._call_backbone(x_in, t_model, context, obs_mask))
 
     dpm = DPM_Solver(
         trajectory_eps_fn,

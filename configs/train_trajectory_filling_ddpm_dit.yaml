@@ -51,7 +51,23 @@ trainer:
     decay: 0.9999
     use_num_updates: true
 
-# Validation / script sampling: ancestral DDPM or DPM-Solver (see src/sampling/dpm_solver.py).
+  checkpoint:
+    monitor: val/loss
+    mode: min
+
+  val_trajectory_metrics:
+    enabled: false
+    max_samples: 512
+    every_n_val_epochs: 1
+    num_paths: 20
+    horizon_stride: 20
+    metrics_start_t: 0
+    prediction_mode: blended
+    guidance_scale_override: null
+    verbose: false
+    sampling: null
+
+# Validation / script sampling: ancestral, DDIM, or DPM-Solver.
 sampling:
   method: ancestral
   dpm:
@@ -62,6 +78,9 @@ sampling:
     solver_method: singlestep
     lower_order_final: true
     denoise_to_zero: false
+  ddim:
+    steps: 50
+    eta: 0.0
 
 hydra:
   run:

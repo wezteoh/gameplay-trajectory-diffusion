@@ -1,6 +1,6 @@
 defaults:
   - data: trajectory_nba_filling
-  - model: trajectory_filling_ddpm_reverse_led
+  - model: trajectory_filling_ddpm_dit_learnsigma
   - _self_
 
 seed: 42
@@ -13,7 +13,7 @@ wandb:
   enabled: true
   project: trajectory-filling-ddpm
   entity: null
-  name: reverse-led-delta-ctx-4-layer-transformer
+  name: dit-learnsigma-trajectory-filling
   save_dir: ./wandb
   log_model: false
 
@@ -25,12 +25,12 @@ logging:
 
 trainer:
   lightning:
-    max_epochs: 500
+    max_epochs: 800
     accelerator: auto
     devices: 1
     precision: 32
     log_every_n_steps: 50
-    check_val_every_n_epoch: 1
+    check_val_every_n_epoch: 20
     val_check_interval: null
     limit_val_batches: null
     deterministic: false
@@ -39,7 +39,7 @@ trainer:
   val_logging:
     enabled: true
     num_samples: 5
-    log_every_n_val_epochs: 10
+    log_every_n_val_epochs: 1
 
   optim:
     learning_rate: 0.0001
@@ -52,34 +52,44 @@ trainer:
     use_num_updates: true
 
   checkpoint:
-    monitor: val/loss
+    monitor: val/jade_min_20frames
     mode: min
 
   val_trajectory_metrics:
-    enabled: false
+    enabled: true
     max_samples: 512
     every_n_val_epochs: 1
     num_paths: 20
     horizon_stride: 20
-    metrics_start_t: 0
-    prediction_mode: blended
-    guidance_scale_override: null
+    metrics_start_t: 10
+    prediction_mode: pure
+    guidance_scale_override: 2.0
     verbose: false
-    sampling: null
+    sampling:
+      method: dpm
+      dpm:
+        steps: 40
+        order: 3
+        skip_type: time_uniform
+        algorithm_type: dpmsolver++
+        solver_method: singlestep
+        lower_order_final: true
+        denoise_to_zero: false
 
+# Validation / script sampling: ancestral, DDIM, or DPM-Solver.
 sampling:
   method: ancestral
-  dpm:
-    steps: 20
-    order: 3
-    skip_type: time_uniform
-    algorithm_type: dpmsolver++
-    solver_method: singlestep
-    lower_order_final: true
-    denoise_to_zero: false
-  ddim:
-    steps: 50
-    eta: 0.0
+  # dpm:
+  #   steps: 20
+  #   order: 3
+  #   skip_type: time_uniform
+  #   algorithm_type: dpmsolver++
+  #   solver_method: singlestep
+  #   lower_order_final: true
+  #   denoise_to_zero: false
+  # ddim:
+  #   steps: 50
+  #   eta: 0.0
 
 hydra:
   run:

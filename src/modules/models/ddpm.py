@@ -1,30 +1,35 @@
 from __future__ import annotations
 
 import inspect
+from typing import Any
 
 import torch
 import torch.nn as nn
 
-from src.modules.diffusion.schedule import DDPMNoiseSchedule
+from src.modules.diffusion.gaussian_diffusion import GaussianDiffusion
 
 
 class TrajectoryDDPMModel(nn.Module):
-    """DDPM wrapper: epsilon backbone + noise schedule (training + sampling)."""
+    """DDPM wrapper: backbone + Gaussian diffusion (training + sampling)."""
 
     def __init__(
         self,
         backbone: nn.Module,
-        schedule: DDPMNoiseSchedule,
+        schedule: GaussianDiffusion,
         parameterization: str = "eps",
     ) -> None:
         super().__init__()
         self.backbone = backbone
         self.schedule = schedule
         self.parameterization = str(parameterization)
-        if self.parameterization != "eps":
+        if self.parameterization not in ("eps", "x0"):
             raise ValueError(
-                f"Only parameterization='eps' supported, got {parameterization!r}"
+                f"Only parameterization in ('eps','x0') supported, got {parameterization!r}"
             )
+
+    @property
+    def learn_sigma(self) -> bool:
+        return bool(getattr(self.backbone, "learn_sigma", False))
 
     def _backbone_accepts_mask(self) -> bool:
         return "mask" in inspect.signature(self.backbone.forward).parameters
@@ -46,7 +51,10 @@ class TrajectoryDDPMModel(nn.Module):
         t: torch.Tensor,
         context: torch.Tensor | None = None,
         obs_mask: torch.Tensor | None = None,
+        **kwargs: Any,
     ) -> torch.Tensor:
+        if context is None:
+            context = kwargs.get("context")
         if context is None:
             context = torch.zeros(
                 x_t.shape[0],
@@ -56,50 +64,18 @@ class TrajectoryDDPMModel(nn.Module):
                 device=x_t.device,
                 dtype=x_t.dtype,
             )
+        obs_mask = kwargs.get("obs_mask", obs_mask)
         return self._call_backbone(x_t, t, context, obs_mask)
 
-    @torch.no_grad()
-    def sample(
+    def load_state_dict(
         self,
-        batch_size: int,
-        seq_len: int,
-        num_agents: int,
-        coord_dim: int,
-        device: torch.device,
-        context: torch.Tensor | None = None,
-        obs_mask: torch.Tensor | None = None,
-        guidance_scale: float = 1.0,
-        dtype: torch.dtype = torch.float32,
-        verbose: bool = False,
-        cfg_null_context: torch.Tensor | None = None,
-        cfg_null_mask: torch.Tensor | None = None,
-        sampler: str = "ancestral",
-        dpm_config: dict | None = None,
-    ) -> torch.Tensor:
-        """Reverse sampling; returns x_0 shaped [B, S, N, C].
-
-        ``sampler`` is ``\"ancestral\"`` or ``\"dpm\"`` (DPM-Solver). When ``dpm``,
-        pass optional ``dpm_config`` (steps, order, etc.); see
-        :func:`src.inference.trajectory_sample.sample_with_trace`.
-        """
-        from src.inference.trajectory_sample import sample_with_trace
-
-        x, _ = sample_with_trace(
-            self,
-            batch_size=batch_size,
-            seq_len=seq_len,
-            num_agents=num_agents,
-            coord_dim=coord_dim,
-            device=device,
-            context=context,
-            obs_mask=obs_mask,
-            guidance_scale=guidance_scale,
-            dtype=dtype,
-            verbose=verbose,
-            cfg_null_context=cfg_null_context,
-            cfg_null_mask=cfg_null_mask,
-            trace_every=None,
-            sampler=sampler,
-            dpm_config=dpm_config,
-        )
-        return x
+        state_dict: dict[str, Any],
+        strict: bool = True,
+    ) -> Any:
+        """Drop legacy ``schedule.*`` tensors except ``schedule.betas``; derived buffers are rebuilt."""
+        filtered: dict[str, Any] = {}
+        for k, v in state_dict.items():
+            if k.startswith("schedule.") and k != "schedule.betas":
+                continue
+            filtered[k] = v
+        return super().load_state_dict(filtered, strict=strict)

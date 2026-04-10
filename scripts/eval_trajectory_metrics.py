@@ -22,8 +22,13 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import sample_trajectory_ddpm as sd  # noqa: E402
-from src.inference.trajectory_sample import model_name, sample_batch_multi_path  # noqa: E402
-from src.utils.trajectory_coords import denormalize_court_xy, denormalize_delta  # noqa: E402
+
+from src.inference.trajectory_sample import (  # noqa: E402
+    ground_truth_normalized_filling,
+    model_name,
+    sample_batch_multi_path,
+)
+from src.utils.trajectory_coords import denormalize_court_xy  # noqa: E402
 from src.utils.trajectory_metrics import (  # noqa: E402
     finalize_metric_state,
     init_metric_state,
@@ -32,14 +37,18 @@ from src.utils.trajectory_metrics import (  # noqa: E402
 )
 from train import _build_datamodule, _build_module  # noqa: E402
 
-_DATA_PRESETS = tuple(sorted(p.stem for p in (_REPO_ROOT / "configs" / "data").glob("*.yaml")))
+_DATA_PRESETS = tuple(
+    sorted(p.stem for p in (_REPO_ROOT / "configs" / "data").glob("*.yaml"))
+)
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="ADE/FDE/JADE/JFDE on validation data from a checkpoint (court units).",
     )
-    p.add_argument("--checkpoint", type=str, required=True, help="Lightning .ckpt path.")
+    p.add_argument(
+        "--checkpoint", type=str, required=True, help="Lightning .ckpt path."
+    )
     p.add_argument(
         "--data",
         type=str,
@@ -50,14 +59,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--num-paths",
         type=int,
-        default=5,
-        help="Stochastic samples per validation row (default: 5).",
+        default=20,
+        help="Stochastic samples per validation row (default: 20).",
     )
     p.add_argument(
         "--horizon-stride",
         type=int,
-        default=5,
-        help="Cumulative horizon stride for metric keys (default: 5).",
+        default=20,
+        help="Cumulative horizon stride for metric keys (default: 20).",
     )
     p.add_argument(
         "--metrics-start-t",
@@ -66,6 +75,17 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "First timestep index (0-based) included in ADE/JADE/FDE/JFDE. "
             "Metrics use only times [t, T). Default 0 = full sequence."
+        ),
+    )
+    p.add_argument(
+        "--prediction-mode",
+        type=str,
+        default="blended",
+        choices=("blended", "pure"),
+        help=(
+            "blended: obs/GT blend for positions (masked steps roll out from last observed). "
+            "pure: position_0 + cumsum(predicted deltas), no blend. "
+            "Both use full horizon then --metrics-start-t slice for ADE/FDE."
         ),
     )
     p.add_argument(
@@ -97,21 +117,33 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--sampling-method",
         type=str,
-        default=None,
-        choices=("ancestral", "dpm"),
-        help="Override cfg.sampling.method (default: checkpoint config).",
+        default="dpm",
+        choices=("ancestral", "dpm", "ddim"),
+        help="Override cfg.sampling.method (ancestral, dpm, or ddim).",
     )
     p.add_argument(
         "--dpm-steps",
         type=int,
-        default=None,
+        default=40,
         help="Override cfg.sampling.dpm.steps for DPM-Solver.",
     )
     p.add_argument(
         "--dpm-order",
         type=int,
-        default=None,
+        default=3,
         help="Override cfg.sampling.dpm.order for DPM-Solver.",
+    )
+    p.add_argument(
+        "--ddim-steps",
+        type=int,
+        default=500,
+        help="Override cfg.sampling.ddim.steps when --sampling-method=ddim (default: from config or 50).",
+    )
+    p.add_argument(
+        "--ddim-eta",
+        type=float,
+        default=0.0,
+        help="Override cfg.sampling.ddim.eta when --sampling-method=ddim (0 = deterministic).",
     )
     p.add_argument(
         "--no-progress",
@@ -119,27 +151,6 @@ def _parse_args() -> argparse.Namespace:
         help="Disable the per-sample progress bar (e.g. for logs/CI).",
     )
     return p.parse_args()
-
-
-def _ground_truth_normalized(
-    module: Any,
-    batch: dict[str, torch.Tensor],
-    mname: str,
-) -> torch.Tensor:
-    """Full trajectory in normalized court space ``[B, T, A, 2]``."""
-    if mname != "trajectory_filling_ddpm":
-        raise ValueError(
-            f"Unsupported model.name: {mname!r}; expected 'trajectory_filling_ddpm'"
-        )
-    traj_key = str(module.trajectory_key)
-    pos0 = batch[str(module.position_0_key)]
-    x0 = batch[traj_key]
-    d_raw = denormalize_delta(
-        x0,
-        module._delta_shift,
-        module._delta_scale,
-    )
-    return pos0.unsqueeze(1) + torch.cumsum(d_raw, dim=1)
 
 
 def _val_sample_total(val_loader: Any, max_samples: int | None) -> int | None:
@@ -181,6 +192,10 @@ def main() -> None:
     module.eval()
 
     mname = model_name(cfg)
+    if mname != "trajectory_filling_ddpm":
+        raise ValueError(
+            f"Unsupported model.name: {mname!r}; expected 'trajectory_filling_ddpm'"
+        )
     datamodule = _build_datamodule(cfg.data)
     datamodule.setup("validate")
     val_loader = datamodule.val_dataloader()
@@ -205,37 +220,45 @@ def main() -> None:
             if remain <= 0:
                 break
             if remain < bs:
-                batch = {k: v[:remain] if torch.is_tensor(v) else v for k, v in batch.items()}
+                batch = {
+                    k: v[:remain] if torch.is_tensor(v) else v for k, v in batch.items()
+                }
                 bs = remain
 
-        samples = sample_batch_multi_path(
+        gt_n = ground_truth_normalized_filling(module, batch)
+        t_g = int(gt_n.shape[1])
+        ts = int(args.metrics_start_t)
+        if ts < 0 or ts >= t_g:
+            raise ValueError(
+                f"--metrics-start-t must satisfy 0 <= t < T; got t={ts}, T={t_g}."
+            )
+
+        mode = str(args.prediction_mode).strip().lower()
+        if mode not in ("blended", "pure"):
+            raise ValueError(f"prediction_mode must be blended or pure; got {mode!r}")
+
+        cw = float(module.court_width)
+        ch = float(module.court_height)
+        samples_norm = sample_batch_multi_path(
             module,
             cfg,
             batch,
             device,
             int(args.num_paths),
+            position_mode=mode,
             guidance_scale_override=args.guidance_scale,
             verbose=bool(args.verbose),
         )
-        gt_n = _ground_truth_normalized(module, batch, mname)
-
-        t_s = int(samples.shape[2])
-        t_g = int(gt_n.shape[1])
+        t_s = int(samples_norm.shape[2])
         if t_s != t_g:
-            raise ValueError(f"Prediction length T={t_s} != ground-truth T={t_g} for task {mname}.")
-
-        ts = int(args.metrics_start_t)
-        if ts < 0 or ts >= t_s:
-            raise ValueError(f"--metrics-start-t must satisfy 0 <= t < T; got t={ts}, T={t_s}.")
-
-        cw = float(module.court_width)
-        ch = float(module.court_height)
-        samples_c = denormalize_court_xy(samples, cw, ch)
-        gt_c = denormalize_court_xy(gt_n, cw, ch)
-
+            raise ValueError(
+                f"Prediction length T={t_s} != ground-truth T={t_g} for task {mname}."
+            )
         if ts > 0:
-            samples_c = samples_c[:, :, ts:, :, :]
-            gt_c = gt_c[:, ts:, :, :]
+            samples_norm = samples_norm[:, :, ts:, :, :]
+        gt_slice = gt_n[:, ts:, :, :] if ts > 0 else gt_n
+        samples_c = denormalize_court_xy(samples_norm, cw, ch)
+        gt_c = denormalize_court_xy(gt_slice, cw, ch)
 
         dist = l2_distances(samples_c, gt_c)
         update_metric_state(
@@ -255,6 +278,7 @@ def main() -> None:
     print(json.dumps(final, indent=2, sort_keys=True))
     ts = int(args.metrics_start_t)
     print(f"metrics_start_t={ts}", flush=True)
+    print(f"prediction_mode={str(args.prediction_mode).strip().lower()}", flush=True)
     print(f"rows_evaluated={processed}", flush=True)
 
 

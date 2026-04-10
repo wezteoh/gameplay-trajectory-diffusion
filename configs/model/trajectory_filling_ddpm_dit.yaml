@@ -19,6 +19,14 @@ cosine_s: 8.0e-3
 parameterization: eps
 loss_type: l2
 
+# DiT-style diffusion (see src/modules/diffusion/gaussian_diffusion.py).
+diffusion_loss_type: mse
+# Extra no_grad forward to log vb for fixed-variance models; set false to save compute.
+log_diagnostic_vb: true
+model_var_type: fixed_small
+clip_denoised: false
+legacy_posterior_log_variance: false
+
 backbone:
   _target_: src.modules.backbones.dit_backbone.DITBackbone
   max_seq_len: ${data.delta_len}
@@ -37,3 +45,4 @@ backbone:
   d_ff_spatial: 512
   num_timesteps: ${..timesteps}
   patch_size: 5
+  learn_sigma: false

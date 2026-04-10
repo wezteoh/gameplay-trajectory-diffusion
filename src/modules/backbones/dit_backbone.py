@@ -165,6 +165,7 @@ class DITBackbone(Module):
         d_ff_spatial: int = 1024,
         num_timesteps: int = 1000,
         patch_size: int = 1,
+        learn_sigma: bool = False,
     ) -> None:
         super().__init__()
         self.max_seq_len = int(max_seq_len)
@@ -187,6 +188,7 @@ class DITBackbone(Module):
         self.context_with_mask_channels = self.context_channels + 1
         self.num_timesteps = max(1, int(num_timesteps))
         self.patch_size = int(patch_size)
+        self.learn_sigma = bool(learn_sigma)
 
         hidden_size = int(context_dim)
         if int(d_model_temporal) != hidden_size or int(d_model_spatial) != hidden_size:
@@ -242,9 +244,11 @@ class DITBackbone(Module):
                 for _ in range(int(n_spatial_layer))
             ]
         )
+        _patch_out = self.patch_size * self.coord_dim
+        self._patch_out_dim = _patch_out
         self.final_layer = DiTFinalLayer1D(
             hidden_size=hidden_size,
-            out_dim=self.patch_size * self.coord_dim,
+            out_dim=_patch_out * (2 if self.learn_sigma else 1),
         )
 
         self.initialize_weights()
@@ -275,6 +279,11 @@ class DITBackbone(Module):
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+        if self.learn_sigma:
+            d = self._patch_out_dim
+            with torch.no_grad():
+                self.final_layer.linear.weight[d:, :].zero_()
+                self.final_layer.linear.bias[d:].zero_()
 
     def _agent_query_embedding(self, ref: torch.Tensor) -> torch.Tensor:
         idx = torch.zeros(1, device=ref.device, dtype=torch.long)
@@ -341,7 +350,9 @@ class DITBackbone(Module):
             context: [B, T, A, context_channels]
             mask: [B, T, A] optional observation mask concatenated to context
         Returns:
-            eps prediction: [B, T, A, coord_dim]
+            If ``learn_sigma`` is false: ``[B, T, A, coord_dim]`` epsilon prediction.
+            If true: ``[B, T, A, 2 * coord_dim]`` concatenated epsilon and variance
+            auxiliary (DiT ``LEARNED_RANGE`` head).
         """
         if x.ndim != 4:
             raise ValueError(f"Expected x [B, T, A, C], got {tuple(x.shape)}")
@@ -417,4 +428,10 @@ class DITBackbone(Module):
         c_final = t_emb.repeat_interleave(a, dim=0)
         x_final = self.final_layer(x_final, c_final)
         x_final = rearrange(x_final, "(b a) n d -> b a n d", b=b, a=a)
+        if self.learn_sigma:
+            d = self._patch_out_dim
+            eps_tok, var_tok = x_final.split(d, dim=-1)
+            eps_bt = self._unpatchify(eps_tok, target_len=t_len)
+            var_bt = self._unpatchify(var_tok, target_len=t_len)
+            return torch.cat([eps_bt, var_bt], dim=-1)
         return self._unpatchify(x_final, target_len=t_len)

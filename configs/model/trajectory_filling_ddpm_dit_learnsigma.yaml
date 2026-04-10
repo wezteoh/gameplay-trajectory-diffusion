@@ -8,7 +8,7 @@ position_0_key: position_0
 guidance_scale: 2.0
 p_uncond: 0.1
 # When true, log a second video (GT-obs + predicted-deltas blend) alongside pure prediction.
-log_blend_trajectory_video: true
+log_blend_trajectory_video: false
 
 timesteps: 1000
 beta_schedule: linear
@@ -19,25 +19,30 @@ cosine_s: 8.0e-3
 parameterization: eps
 loss_type: l2
 
-diffusion_loss_type: mse
+# DiT-style diffusion (see src/modules/diffusion/gaussian_diffusion.py).
+diffusion_loss_type: rescaled_mse
+# Ignored when variance is learned (vb is already in the loss); kept for consistency.
 log_diagnostic_vb: true
-model_var_type: fixed_small
+model_var_type: learned_range
 clip_denoised: false
 legacy_posterior_log_variance: false
 
 backbone:
-  _target_: src.modules.backbones.reverseledlike_backbone.ReverseLEDLikeBackbone
+  _target_: src.modules.backbones.dit_backbone.DITBackbone
   max_seq_len: ${data.delta_len}
   num_agents: ${data.num_agents}
   coord_dim: ${data.coord_dim}
+  # train.py overrides this to 4 when include_delta_in_context=true.
+  context_channels: ${data.coord_dim}
   context_dim: 256
   n_temporal_layer: 4
   d_model_temporal: 256
   nhead_temporal: 8
   d_ff_temporal: 512
-  n_spatial_layer: 8
+  n_spatial_layer: 4
   d_model_spatial: 256
   nhead_spatial: 8
   d_ff_spatial: 512
   num_timesteps: ${..timesteps}
-  agent_embedding_dim: 64
+  patch_size: 5
+  learn_sigma: true

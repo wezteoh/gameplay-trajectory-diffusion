@@ -1685,7 +1685,7 @@ def create_basketball_frame(
         raise ValueError(f"frame_idx {frame_idx} out of range for T={t_len}")
     hist_n = max(1, int(history))
 
-    fig, ax = plt.subplots(1, 1, figsize=(15, 8), dpi=32)
+    fig, ax = plt.subplots(1, 1, figsize=(7.5, 4), dpi=32)
     court = Court(court_type="nba", origin="bottom-left", units="ft")
     court.draw(ax=ax, showaxis=False)
 
@@ -1708,7 +1708,7 @@ def create_basketball_frame(
             ax.scatter(
                 [xy[0, 0]],
                 [xy[0, 1]],
-                s=35,
+                s=36,
                 c=[color],
                 edgecolors="white",
                 linewidths=0.9,

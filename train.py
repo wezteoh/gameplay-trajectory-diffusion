@@ -11,9 +11,15 @@ from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 
 from hydra.utils import instantiate
 
+from src.callbacks.validation_monitored_metric import MonitoredMetricValidationCallback
 from src.data.nba_trajectory_filling import NBATrajectoryFillingDataModule
 from src.interfaces.trajectory_filling_ddpm import TrajectoryFillingDDPMInterface
-from src.modules.diffusion.schedule import DDPMNoiseSchedule
+from src.modules.diffusion.gaussian_diffusion import (
+    GaussianDiffusion,
+    parse_loss_type,
+    parse_model_mean_type,
+    parse_model_var_type,
+)
 from src.modules.models.ddpm import TrajectoryDDPMModel
 
 
@@ -24,17 +30,53 @@ def _build_datamodule(data_cfg: DictConfig) -> Any:
     raise ValueError(f"Unsupported dataset: {data_cfg.name}")
 
 
-def _sampling_kwargs(cfg: DictConfig) -> tuple[str, dict[str, Any]]:
-    """Read ``cfg.sampling`` for validation / checkpoint sampling (ancestral vs DPM-Solver)."""
-    s = OmegaConf.select(cfg, "sampling", default=None)
-    if s is None:
-        return "ancestral", {}
-    method = str(OmegaConf.select(s, "method", default="ancestral"))
-    raw = OmegaConf.select(s, "dpm", default={})
-    dpm = OmegaConf.to_container(raw, resolve=True) if raw is not None else {}
-    if not isinstance(dpm, dict):
-        dpm = {}
-    return method, dpm
+def _resolved_sampling_subdict(node: Any) -> dict[str, Any]:
+    if node is None:
+        return {}
+    if OmegaConf.is_config(node):
+        out = OmegaConf.to_container(node, resolve=True)
+        return dict(out) if isinstance(out, dict) else {}
+    if isinstance(node, dict):
+        return dict(node)
+    return {}
+
+
+def _sampling_kwargs_from_node(
+    node: Any,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Parse a ``sampling``-shaped config node (method, dpm, ddim)."""
+    if node is None:
+        return "ancestral", {}, {}
+    method = str(OmegaConf.select(node, "method", default="ancestral"))
+    dpm = _resolved_sampling_subdict(OmegaConf.select(node, "dpm", default=None))
+    ddim = _resolved_sampling_subdict(OmegaConf.select(node, "ddim", default=None))
+    return method, dpm, ddim
+
+
+def _sampling_kwargs(
+    cfg: DictConfig,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Read ``cfg.sampling`` for validation video sampling."""
+    return _sampling_kwargs_from_node(OmegaConf.select(cfg, "sampling", default=None))
+
+
+def _resolve_checkpoint_monitor(raw: str) -> str:
+    s = str(raw).strip()
+    if not s:
+        return "val/loss"
+    if "/" not in s:
+        return f"val/{s}"
+    return s
+
+
+def _checkpoint_filename_template(monitor: str) -> str:
+    """``ModelCheckpoint.filename`` with epoch, step, and monitored quantity name + value.
+
+    Uses ``auto_insert_metric_name=False`` at the call site so keys like ``val/loss`` do not
+    create nested paths (see Lightning ``ModelCheckpoint`` docs).
+    """
+    safe = str(monitor).replace("/", "_").replace("\\", "_")
+    return f"traj-ddpm-{{epoch}}-{{step}}-{safe}={{{monitor}:.4f}}"
 
 
 def _build_module(cfg: DictConfig) -> pl.LightningModule:
@@ -60,9 +102,7 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
     )
 
     include_delta_ctx = bool(
-        OmegaConf.select(
-            data_cfg, "params.include_delta_in_context", default=False
-        )
+        OmegaConf.select(data_cfg, "params.include_delta_in_context", default=False)
     )
     context_channels = 4 if include_delta_ctx else int(data_cfg.coord_dim)
     backbone = instantiate(
@@ -70,12 +110,24 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
         _recursive_=False,
         context_channels=context_channels,
     )
-    schedule = DDPMNoiseSchedule(
+    schedule = GaussianDiffusion(
         timesteps=int(model_cfg.timesteps),
         beta_schedule=str(model_cfg.beta_schedule),
         linear_start=float(model_cfg.linear_start),
         linear_end=float(model_cfg.linear_end),
         cosine_s=float(model_cfg.cosine_s),
+        legacy_posterior_log_variance=bool(
+            OmegaConf.select(model_cfg, "legacy_posterior_log_variance", default=False)
+        ),
+        model_mean_type=parse_model_mean_type(str(model_cfg.parameterization)),
+        model_var_type=parse_model_var_type(
+            str(OmegaConf.select(model_cfg, "model_var_type", default="fixed_small"))
+        ),
+        loss_type=parse_loss_type(
+            str(OmegaConf.select(model_cfg, "diffusion_loss_type", default="mse"))
+        ),
+        clip_denoised=bool(OmegaConf.select(model_cfg, "clip_denoised", default=False)),
+        coord_channels=int(data_cfg.coord_dim),
     )
     ddpm_model = TrajectoryDDPMModel(
         backbone=backbone,
@@ -84,7 +136,7 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
     )
     court_w = float(OmegaConf.select(data_cfg, "court_width", default=94.0))
     court_h = float(OmegaConf.select(data_cfg, "court_height", default=50.0))
-    sampling_method, sampling_dpm = _sampling_kwargs(cfg)
+    sampling_method, sampling_dpm, sampling_ddim = _sampling_kwargs(cfg)
     vl = OmegaConf.select(cfg, "trainer.val_logging", default=None)
     if vl is None:
         val_logging_enabled = bool(cfg.wandb.enabled)
@@ -117,18 +169,14 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
         OmegaConf.select(
             model_cfg,
             "context_key",
-            default=OmegaConf.select(
-                data_cfg, "params.context_key", default="context"
-            ),
+            default=OmegaConf.select(data_cfg, "params.context_key", default="context"),
         )
     )
     mask_key = str(
         OmegaConf.select(
             model_cfg,
             "mask_key",
-            default=OmegaConf.select(
-                data_cfg, "params.mask_key", default="obs_mask"
-            ),
+            default=OmegaConf.select(data_cfg, "params.mask_key", default="obs_mask"),
         )
     )
     pos0_key = str(
@@ -141,11 +189,12 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
         )
     )
     p_uncond = float(OmegaConf.select(model_cfg, "p_uncond", default=0.1))
-    guidance_scale = float(
-        OmegaConf.select(model_cfg, "guidance_scale", default=1.0)
-    )
+    guidance_scale = float(OmegaConf.select(model_cfg, "guidance_scale", default=1.0))
     log_blend_trajectory_video = bool(
         OmegaConf.select(model_cfg, "log_blend_trajectory_video", default=True)
+    )
+    log_diagnostic_vb = bool(
+        OmegaConf.select(model_cfg, "log_diagnostic_vb", default=True)
     )
     full_t = int(data_cfg.full_seq_len)
     delta_len = int(OmegaConf.select(data_cfg, "delta_len", default=full_t))
@@ -159,6 +208,48 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
     )
     d_shift = OmegaConf.select(data_cfg, "params.delta_shift", default=[0.0, 0.0])
     d_scale = OmegaConf.select(data_cfg, "params.delta_scale", default=[1.0, 1.0])
+
+    vtm = OmegaConf.select(cfg, "trainer.val_trajectory_metrics", default=None)
+    if vtm is None:
+        val_traj_enabled = False
+        val_traj_max_samples = 512
+        val_traj_every_n = 1
+        val_traj_num_paths = 20
+        val_traj_horizon_stride = 20
+        val_traj_start_t = 0
+        val_traj_gs_override = None
+        val_traj_verbose = False
+        val_traj_prediction_mode = "blended"
+        vm_method, vm_dpm, vm_ddim = sampling_method, sampling_dpm, sampling_ddim
+    else:
+        val_traj_enabled = bool(OmegaConf.select(vtm, "enabled", default=False))
+        val_traj_max_samples = int(OmegaConf.select(vtm, "max_samples", default=512))
+        val_traj_every_n = int(OmegaConf.select(vtm, "every_n_val_epochs", default=1))
+        val_traj_num_paths = int(OmegaConf.select(vtm, "num_paths", default=20))
+        val_traj_horizon_stride = int(
+            OmegaConf.select(vtm, "horizon_stride", default=20)
+        )
+        val_traj_start_t = int(OmegaConf.select(vtm, "metrics_start_t", default=0))
+        raw_gs = OmegaConf.select(vtm, "guidance_scale_override", default=None)
+        val_traj_gs_override = None if raw_gs is None else float(raw_gs)
+        val_traj_verbose = bool(OmegaConf.select(vtm, "verbose", default=False))
+        val_traj_prediction_mode = (
+            str(OmegaConf.select(vtm, "prediction_mode", default="blended"))
+            .strip()
+            .lower()
+        )
+        if val_traj_prediction_mode not in ("blended", "pure"):
+            raise ValueError(
+                "trainer.val_trajectory_metrics.prediction_mode must be "
+                "'blended' or 'pure' (blended_anchored was removed), got "
+                f"{val_traj_prediction_mode!r}"
+            )
+        vtm_samp = OmegaConf.select(vtm, "sampling", default=None)
+        if vtm_samp is None:
+            vm_method, vm_dpm, vm_ddim = sampling_method, sampling_dpm, sampling_ddim
+        else:
+            vm_method, vm_dpm, vm_ddim = _sampling_kwargs_from_node(vtm_samp)
+
     return TrajectoryFillingDDPMInterface(
         model=ddpm_model,
         seq_len=delta_len,
@@ -191,6 +282,20 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
         log_blend_trajectory_video=log_blend_trajectory_video,
         sampling_method=sampling_method,
         sampling_dpm=sampling_dpm,
+        sampling_ddim=sampling_ddim,
+        log_diagnostic_vb=log_diagnostic_vb,
+        val_traj_metrics_enabled=val_traj_enabled,
+        val_traj_metrics_max_samples=val_traj_max_samples,
+        val_traj_metrics_every_n_val_epochs=val_traj_every_n,
+        val_traj_metrics_num_paths=val_traj_num_paths,
+        val_traj_metrics_horizon_stride=val_traj_horizon_stride,
+        val_traj_metrics_start_t=val_traj_start_t,
+        val_traj_metrics_guidance_scale_override=val_traj_gs_override,
+        val_traj_metrics_verbose=val_traj_verbose,
+        val_metrics_sampling_method=vm_method,
+        val_metrics_sampling_dpm=vm_dpm,
+        val_metrics_sampling_ddim=vm_ddim,
+        val_traj_metrics_prediction_mode=val_traj_prediction_mode,
     )
 
 
@@ -335,9 +440,20 @@ def main(cfg: DictConfig) -> None:
         logger = TensorBoardLogger(**tb_kwargs)
         checkpoint_relpath = os.path.join(project_seg, f"tb_v{logger.version}")
 
-    monitor, mode = "val/loss", "min"
-    filename = "traj-ddpm-{epoch}-{step}"
+    ckpt_cfg = OmegaConf.select(cfg, "trainer.checkpoint", default=None)
+    if ckpt_cfg is None:
+        monitor_raw, mode = "val/loss", "min"
+    else:
+        monitor_raw = str(OmegaConf.select(ckpt_cfg, "monitor", default="val/loss"))
+        mode = str(OmegaConf.select(ckpt_cfg, "mode", default="min"))
+    monitor = _resolve_checkpoint_monitor(monitor_raw)
+    if mode not in ("min", "max"):
+        raise ValueError(
+            f"trainer.checkpoint.mode must be 'min' or 'max', got {mode!r}"
+        )
+    filename = _checkpoint_filename_template(monitor)
     callbacks = [
+        MonitoredMetricValidationCallback(monitor=monitor),
         ModelCheckpoint(
             dirpath=os.path.join("checkpoints", checkpoint_relpath),
             monitor=monitor,
@@ -345,8 +461,8 @@ def main(cfg: DictConfig) -> None:
             save_top_k=2,
             save_last=True,
             filename=filename,
-            auto_insert_metric_name=True,
-        )
+            auto_insert_metric_name=False,
+        ),
     ]
     if logger is not False:
         callbacks.append(LearningRateMonitor(logging_interval="step"))

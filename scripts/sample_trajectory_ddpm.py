@@ -28,8 +28,14 @@ from src.inference.trajectory_sample import (  # noqa: E402
 from src.interfaces.trajectory_filling_ddpm import (  # noqa: E402
     _blend_traj_rollout_from_last_observed,
 )
-from src.utils.drawing import create_frames_from_trajectory, create_video_from_frames  # noqa: E402
-from src.utils.trajectory_coords import denormalize_court_xy_numpy, denormalize_delta  # noqa: E402
+from src.utils.drawing import (
+    create_frames_from_trajectory,
+    create_video_from_frames,
+)  # noqa: E402
+from src.utils.trajectory_coords import (
+    denormalize_court_xy_numpy,
+    denormalize_delta,
+)  # noqa: E402
 from train import _build_datamodule, _build_module  # noqa: E402
 
 _DATA_PRESETS = tuple(
@@ -146,8 +152,9 @@ def _parse_args() -> argparse.Namespace:
         "--sampling-method",
         type=str,
         default=None,
-        choices=("ancestral", "dpm"),
-        help="Override cfg.sampling.method (ancestral or dpm). Default: from checkpoint config.",
+        choices=("ancestral", "dpm", "ddim"),
+        help="Override cfg.sampling.method (ancestral, dpm, or ddim). "
+        "Default: from checkpoint config.",
     )
     p.add_argument(
         "--dpm-steps",
@@ -160,6 +167,18 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Override cfg.sampling.dpm.order when using DPM-Solver.",
+    )
+    p.add_argument(
+        "--ddim-steps",
+        type=int,
+        default=None,
+        help="Override cfg.sampling.ddim.steps when --sampling-method=ddim.",
+    )
+    p.add_argument(
+        "--ddim-eta",
+        type=float,
+        default=None,
+        help="Override cfg.sampling.ddim.eta (0 = deterministic DDIM).",
     )
     return p.parse_args()
 
@@ -230,6 +249,15 @@ def _merge_sampling_cli(cfg: DictConfig, args: argparse.Namespace) -> None:
             cfg.sampling.dpm.steps = int(args.dpm_steps)
         if args.dpm_order is not None:
             cfg.sampling.dpm.order = int(args.dpm_order)
+    if args.ddim_steps is not None or args.ddim_eta is not None:
+        if OmegaConf.select(cfg, "sampling") is None:
+            cfg.sampling = OmegaConf.create({})
+        if OmegaConf.select(cfg, "sampling.ddim") is None:
+            cfg.sampling.ddim = OmegaConf.create({})
+        if args.ddim_steps is not None:
+            cfg.sampling.ddim.steps = int(args.ddim_steps)
+        if args.ddim_eta is not None:
+            cfg.sampling.ddim.eta = float(args.ddim_eta)
 
 
 def _ensure_nba_data_root(cfg: DictConfig) -> None:
@@ -250,10 +278,7 @@ def _val_batch_first_n(
     chunks: list[dict[str, torch.Tensor]] = []
     total = 0
     for batch in loader:
-        batch = {
-            k: v.to(device) if torch.is_tensor(v) else v
-            for k, v in batch.items()
-        }
+        batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
         chunks.append(batch)
         total += next(iter(batch.values())).shape[0]
         if total >= n:
@@ -287,7 +312,7 @@ def _sample_for_task(
             f"Unsupported model.name: {mname!r}; expected 'trajectory_filling_ddpm'"
         )
     meta: dict[str, Any] = {"task": mname}
-    sm, dpm_d = sampling_options_from_cfg(cfg)
+    sm, dpm_d, ddim_d = sampling_options_from_cfg(cfg)
 
     _ensure_nba_data_root(cfg)
     dm = _build_datamodule(cfg.data)
@@ -332,6 +357,7 @@ def _sample_for_task(
         trace_every=trace_every,
         sampler=sm,
         dpm_config=dpm_d,
+        ddim_config=ddim_d,
     )
     d_raw = denormalize_delta(
         deltas_hat,

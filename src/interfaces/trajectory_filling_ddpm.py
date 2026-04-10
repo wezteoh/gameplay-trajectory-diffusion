@@ -3,13 +3,12 @@ from __future__ import annotations
 import os
 from typing import Any, Callable, Sequence
 
-import numpy as np
 import pytorch_lightning as pl
 import torch
+import torch.distributed as dist
 import wandb
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from src.modules.ema import LitEma
-from src.modules.losses.ddpm import ddpm_training_loss
 from src.modules.models.ddpm import TrajectoryDDPMModel
 from src.utils.drawing import (
     create_frames_from_trajectory,
@@ -90,6 +89,20 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
         guidance_scale: float = 1.0,
         sampling_method: str = "ancestral",
         sampling_dpm: dict | None = None,
+        sampling_ddim: dict | None = None,
+        log_diagnostic_vb: bool = True,
+        val_traj_metrics_enabled: bool = False,
+        val_traj_metrics_max_samples: int = 512,
+        val_traj_metrics_every_n_val_epochs: int = 1,
+        val_traj_metrics_num_paths: int = 20,
+        val_traj_metrics_horizon_stride: int = 20,
+        val_traj_metrics_start_t: int = 0,
+        val_traj_metrics_guidance_scale_override: float | None = None,
+        val_traj_metrics_verbose: bool = False,
+        val_metrics_sampling_method: str = "ancestral",
+        val_metrics_sampling_dpm: dict | None = None,
+        val_metrics_sampling_ddim: dict | None = None,
+        val_traj_metrics_prediction_mode: str = "blended",
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -129,6 +142,36 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
         self.guidance_scale = float(guidance_scale)
         self.sampling_method = str(sampling_method)
         self.sampling_dpm = dict(sampling_dpm) if sampling_dpm else {}
+        self.sampling_ddim = dict(sampling_ddim) if sampling_ddim else {}
+        self.log_diagnostic_vb = bool(log_diagnostic_vb)
+        self.val_traj_metrics_enabled = bool(val_traj_metrics_enabled)
+        self.val_traj_metrics_max_samples = max(0, int(val_traj_metrics_max_samples))
+        self.val_traj_metrics_every_n_val_epochs = max(
+            1, int(val_traj_metrics_every_n_val_epochs)
+        )
+        self.val_traj_metrics_num_paths = max(1, int(val_traj_metrics_num_paths))
+        self.val_traj_metrics_horizon_stride = max(
+            1, int(val_traj_metrics_horizon_stride)
+        )
+        self.val_traj_metrics_start_t = int(val_traj_metrics_start_t)
+        self.val_traj_metrics_guidance_scale_override = (
+            val_traj_metrics_guidance_scale_override
+        )
+        self.val_traj_metrics_verbose = bool(val_traj_metrics_verbose)
+        self.val_metrics_sampling_method = str(val_metrics_sampling_method)
+        self.val_metrics_sampling_dpm = (
+            dict(val_metrics_sampling_dpm) if val_metrics_sampling_dpm else {}
+        )
+        self.val_metrics_sampling_ddim = (
+            dict(val_metrics_sampling_ddim) if val_metrics_sampling_ddim else {}
+        )
+        pm = str(val_traj_metrics_prediction_mode).strip().lower()
+        if pm not in ("blended", "pure"):
+            raise ValueError(
+                "val_traj_metrics_prediction_mode must be 'blended' or 'pure', "
+                f"got {pm!r}"
+            )
+        self.val_traj_metrics_prediction_mode = pm
 
         cf = list(context_fill)
         if len(cf) != 2:
@@ -222,15 +265,32 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
                 ).expand(k, self.seq_len, self.num_agents, self.context_channels)
                 ctx_in[uncond] = fill_e
                 mask_in[uncond] = 0.0
-        pred = self.model(x_t, t, ctx_in, obs_mask=mask_in)
-        loss = ddpm_training_loss(
-            pred,
+        mean_kind = "l2" if self.loss_type == "l2" else "l1"
+        terms = self.model.schedule.training_losses(
+            self.model,
             x0,
-            noise,
-            parameterization=self.parameterization,
-            loss_type=self.loss_type,
+            t,
+            model_kwargs={"context": ctx_in, "obs_mask": mask_in},
+            noise=noise,
+            mean_loss_kind=mean_kind,
+            log_diagnostic_vb=self.log_diagnostic_vb,
         )
+        loss = terms["loss"].mean()
         self.log(f"{prefix}/loss", loss, prog_bar=True, sync_dist=True)
+        if "mse" in terms:
+            self.log(
+                f"{prefix}/mse",
+                terms["mse"].mean(),
+                prog_bar=True,
+                sync_dist=True,
+            )
+        if "vb" in terms:
+            self.log(
+                f"{prefix}/vb",
+                terms["vb"].mean(),
+                prog_bar=True,
+                sync_dist=True,
+            )
         if self.global_step % 200 == 0:
             self.log(
                 f"{prefix}/x0_abs_mean",
@@ -248,23 +308,161 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
 
     def on_validation_epoch_end(self) -> None:
         try:
-            if not self.val_logging_enabled:
-                return
-            if not isinstance(self.logger, (WandbLogger, TensorBoardLogger)):
-                return
-            if self.log_every_n_val_epochs <= 0:
-                return
-            if (self.current_epoch + 1) % self.log_every_n_val_epochs != 0:
-                return
-            trainer = self.trainer
-            if trainer is None or not trainer.is_global_zero:
-                return
-            if self.val_num_samples <= 0:
-                return
-            self._log_sample_trajectory_videos()
+            self._maybe_log_val_trajectory_metrics()
+            if (
+                self.val_logging_enabled
+                and isinstance(self.logger, (WandbLogger, TensorBoardLogger))
+                and self.log_every_n_val_epochs > 0
+                and (self.current_epoch + 1) % self.log_every_n_val_epochs == 0
+                and self.trainer is not None
+                and self.trainer.is_global_zero
+                and self.val_num_samples > 0
+            ):
+                self._log_sample_trajectory_videos()
         finally:
             if self.ema is not None:
                 self.ema.restore(self.model.parameters())
+
+    def _broadcast_val_traj_metric_dict(
+        self, data: dict[str, float]
+    ) -> dict[str, float]:
+        trainer = self.trainer
+        if trainer is None or trainer.world_size <= 1:
+            return data
+        if not dist.is_available() or not dist.is_initialized():
+            return data
+        obj_list: list[dict[str, float] | None] = [
+            data if trainer.is_global_zero else None
+        ]
+        dist.broadcast_object_list(obj_list, src=0)
+        out = obj_list[0]
+        if not isinstance(out, dict):
+            raise RuntimeError("Failed to broadcast validation trajectory metrics.")
+        return out
+
+    def _maybe_log_val_trajectory_metrics(self) -> None:
+        if not self.val_traj_metrics_enabled:
+            return
+        if self.trainer is None:
+            return
+        if getattr(self.trainer, "sanity_checking", False):
+            return
+        if getattr(self.trainer, "fast_dev_run", False):
+            return
+        if (self.current_epoch + 1) % self.val_traj_metrics_every_n_val_epochs != 0:
+            return
+        if self.val_traj_metrics_max_samples <= 0:
+            raise RuntimeError(
+                "val_traj_metrics_max_samples must be positive when "
+                "val_traj_metrics_enabled is true."
+            )
+
+        metrics: dict[str, float] = {}
+        if self.trainer.is_global_zero:
+            metrics = self._compute_val_trajectory_metrics()
+        metrics = self._broadcast_val_traj_metric_dict(metrics)
+        for name, val in metrics.items():
+            self.log(
+                f"val/{name}",
+                float(val),
+                prog_bar=False,
+                sync_dist=False,
+            )
+
+    @torch.no_grad()
+    def _compute_val_trajectory_metrics(self) -> dict[str, float]:
+        from src.inference.trajectory_sample import (
+            ground_truth_normalized_filling,
+            minimal_sample_cfg_filling_ddpm,
+            sample_batch_multi_path,
+        )
+        from src.utils.trajectory_coords import denormalize_court_xy
+        from src.utils.trajectory_metrics import (
+            finalize_metric_state,
+            init_metric_state,
+            l2_distances,
+            update_metric_state,
+        )
+
+        sample_cfg = minimal_sample_cfg_filling_ddpm(
+            sampling_method=self.val_metrics_sampling_method,
+            sampling_dpm=self.val_metrics_sampling_dpm,
+            sampling_ddim=self.val_metrics_sampling_ddim,
+        )
+        trainer = self.trainer
+        if trainer is None:
+            return {}
+        dm = trainer.datamodule
+        if dm is None:
+            return {}
+        self.eval()
+        device = self.device
+        loader = dm.val_dataloader()
+        state = init_metric_state()
+        processed = 0
+        max_s = self.val_traj_metrics_max_samples
+        gs_override = self.val_traj_metrics_guidance_scale_override
+        cw = float(self.court_width)
+        ch = float(self.court_height)
+        ts0 = int(self.val_traj_metrics_start_t)
+
+        for batch in loader:
+            batch = {
+                k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()
+            }
+            bs = next(iter(batch.values())).shape[0]
+            remain = max_s - processed
+            if remain <= 0:
+                break
+            if remain < bs:
+                batch = {
+                    k: v[:remain] if torch.is_tensor(v) else v for k, v in batch.items()
+                }
+                bs = remain
+
+            gt_n = ground_truth_normalized_filling(self, batch)
+            t_g = int(gt_n.shape[1])
+            if ts0 < 0 or ts0 >= t_g:
+                raise ValueError(
+                    f"val_traj_metrics_start_t must satisfy 0 <= t < T; got t={ts0}, T={t_g}."
+                )
+            samples_norm = sample_batch_multi_path(
+                self,
+                sample_cfg,
+                batch,
+                device,
+                int(self.val_traj_metrics_num_paths),
+                position_mode=self.val_traj_metrics_prediction_mode,
+                guidance_scale_override=gs_override,
+                verbose=bool(self.val_traj_metrics_verbose),
+            )
+            t_s = int(samples_norm.shape[2])
+            if t_s != t_g:
+                raise ValueError(
+                    f"Prediction length T={t_s} != ground-truth T={t_g} for metrics."
+                )
+            if ts0 > 0:
+                samples_norm = samples_norm[:, :, ts0:, :, :]
+            if ts0 > 0:
+                gt_slice = gt_n[:, ts0:, :, :]
+            else:
+                gt_slice = gt_n
+            samples_c = denormalize_court_xy(samples_norm, cw, ch)
+            gt_c = denormalize_court_xy(gt_slice, cw, ch)
+            dist_t = l2_distances(samples_c, gt_c)
+            update_metric_state(
+                state,
+                dist_t,
+                horizon_stride=int(self.val_traj_metrics_horizon_stride),
+            )
+            processed += bs
+
+        if processed == 0:
+            raise RuntimeError(
+                "val trajectory metrics: no validation batches processed "
+                "(empty loader or max_samples too small)."
+            )
+        return finalize_metric_state(state)
 
     @torch.no_grad()
     def _log_sample_trajectory_videos(self) -> None:
@@ -290,7 +488,10 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
         null_mask = torch.zeros(
             n, self.seq_len, self.num_agents, device=self.device, dtype=dtype
         )
-        deltas_hat = self.model.sample(
+        from src.inference.trajectory_sample import sample_with_trace
+
+        deltas_hat, _ = sample_with_trace(
+            self.model,
             batch_size=n,
             seq_len=self.seq_len,
             num_agents=self.num_agents,
@@ -304,6 +505,7 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
             cfg_null_mask=null_mask,
             sampler=self.sampling_method,
             dpm_config=self.sampling_dpm,
+            ddim_config=self.sampling_ddim,
         )
         d_raw = denormalize_delta(
             deltas_hat,
@@ -388,6 +590,20 @@ class TrajectoryFillingDDPMInterface(pl.LightningModule):
                     )
         if use_wandb and log_payload:
             self.logger.experiment.log(log_payload, step=self.global_step)
+
+    def load_state_dict(
+        self,
+        state_dict: dict[str, Any],
+        strict: bool = True,
+    ) -> Any:
+        """Drop pre-GaussianDiffusion ``model.schedule.*`` tensors except ``betas`` (rebuilt from betas)."""
+        prefix = "model.schedule."
+        filtered = {
+            k: v
+            for k, v in state_dict.items()
+            if not (k.startswith(prefix) and k != f"{prefix}betas")
+        }
+        return super().load_state_dict(filtered, strict=strict)
 
     def training_step(
         self,
