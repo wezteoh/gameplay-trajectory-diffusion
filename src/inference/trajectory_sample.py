@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Collection
 
 import torch
 from einops import rearrange
@@ -134,6 +134,7 @@ def sample_with_trace(
     cfg_null_context: torch.Tensor | None = None,
     cfg_null_mask: torch.Tensor | None = None,
     trace_every: int | None = None,
+    trace_steps: Collection[int] | None = None,
     sampler: str = "ancestral",
     dpm_config: dict[str, Any] | None = None,
     ddim_config: dict[str, Any] | None = None,
@@ -146,12 +147,26 @@ def sample_with_trace(
     lower_order_final, denoise_to_zero, solver_type). When ``sampler==\"ddim\"``,
     optional ``ddim_config`` overrides defaults (``steps``, ``eta``).
 
-    For ``sampler==\"dpm\"`` and ``trace_every``, trace keys are **solver-step**
-    indices (see :func:`sample_trajectory_dpm_solver`), not DDPM timesteps.
+    Pass **at most one** of ``trace_every`` (log every k steps) or ``trace_steps``
+    (explicit indices). If both are set, raises ``ValueError``.
 
-    For ``sampler==\"ddim\"`` and ``trace_every``, trace keys are **DDIM step**
-    indices (0 after the first transition, then each logged step).
+    Trace key semantics:
+      - **ancestral**: DDPM noise level ``t`` after each ``p_sample`` (and optionally
+        the initial draw if ``num_timesteps`` is listed in ``trace_steps``).
+      - **ddim**: inner loop index ``i`` (and optionally initial noise if
+        ``num_timesteps`` is listed).
+      - **dpm**: solver step keys as in :func:`sample_trajectory_dpm_solver`.
     """
+    if trace_every is not None and trace_steps is not None:
+        raise ValueError("Pass at most one of trace_every and trace_steps.")
+    ts_set: frozenset[int] | None = None
+    if trace_steps is not None:
+        ts_set = frozenset(int(s) for s in trace_steps)
+        if not ts_set:
+            ts_set = None
+    te_val = int(trace_every) if trace_every is not None and trace_every > 0 else None
+    want_trace = ts_set is not None or te_val is not None
+
     if sampler == "dpm":
         opts = _merge_dpm_options(dpm_config)
         return sample_trajectory_dpm_solver(
@@ -168,7 +183,8 @@ def sample_with_trace(
             verbose=verbose,
             cfg_null_context=cfg_null_context,
             cfg_null_mask=cfg_null_mask,
-            trace_every=trace_every,
+            trace_every=te_val,
+            trace_steps=ts_set,
             **opts,
         )
 
@@ -181,8 +197,12 @@ def sample_with_trace(
     x = torch.randn(shape, device=device, dtype=dtype)
     traces: list[tuple[int, torch.Tensor]] = []
 
-    if trace_every is not None and trace_every > 0:
-        traces.append((int(model.schedule.num_timesteps), x.detach().clone()))
+    if want_trace:
+        if ts_set is not None:
+            if int(model.schedule.num_timesteps) in ts_set:
+                traces.append((int(model.schedule.num_timesteps), x.detach().clone()))
+        else:
+            traces.append((int(model.schedule.num_timesteps), x.detach().clone()))
 
     if context is None:
         context = torch.zeros(shape, device=device, dtype=dtype)
@@ -238,8 +258,11 @@ def sample_with_trace(
                 model_kwargs=model_kwargs,
             )
             x = out["sample"]
-            if trace_every is not None and trace_every > 0:
-                if i == 0 or (i % int(trace_every) == 0):
+            if want_trace:
+                if ts_set is not None:
+                    if i in ts_set:
+                        traces.append((int(i), x.detach().clone()))
+                elif i == 0 or (i % int(te_val) == 0):
                     traces.append((int(i), x.detach().clone()))
             if verbose:
                 in_b = (x >= -2) & (x <= 2)
@@ -259,8 +282,11 @@ def sample_with_trace(
             model_kwargs=model_kwargs,
         )
         x = out["sample"]
-        if trace_every is not None and trace_every > 0:
-            if step == 0 or (step % int(trace_every) == 0):
+        if want_trace:
+            if ts_set is not None:
+                if step in ts_set:
+                    traces.append((int(step), x.detach().clone()))
+            elif step == 0 or (step % int(te_val) == 0):
                 traces.append((int(step), x.detach().clone()))
         if verbose:
             in_b = (x >= -2) & (x <= 2)
@@ -284,14 +310,16 @@ def sample_batch_multi_path(
     dpm_config: dict[str, Any] | None = None,
     ddim_config: dict[str, Any] | None = None,
 ) -> torch.Tensor:
-    """Draw ``num_paths`` samples per row; return normalized court positions ``[B,P,T,A,C]``.
+    """Draw ``num_paths`` samples per row; return positions ``[B,P,T,A,C]``.
 
     ``position_mode``:
-      - ``blended`` (default): observed steps match GT; masked steps roll out predicted
-        deltas from the last observed coordinate (same as validation blend videos).
-      - ``pure``: ``position_0 + cumsum(predicted deltas)`` at every step; no mask blend.
+      - ``blended`` (default): observed steps match GT; masked steps roll out
+        predicted deltas from the last observed coordinate (like blend videos).
+      - ``pure``: ``position_0 + cumsum(predicted deltas)`` at every step; no
+        mask blend.
 
-    Returns the full horizon; callers slice ``[metrics_start_t, T)`` for metrics if needed.
+    Returns the full horizon; callers may slice ``[metrics_start_t, T)`` for
+    metrics.
     """
     mname = model_name(cfg)
     p = int(num_paths)

@@ -1,4 +1,7 @@
+from contextlib import contextmanager
+import logging
 from typing import Literal
+import warnings
 
 import matplotlib.lines as lines
 import matplotlib.patches as patches
@@ -13,6 +16,37 @@ from matplotlib.collections import LineCollection
 This is a modified version of the mplbasketball library.
 https://github.com/jason-zheng/mplbasketball
 """
+
+# Extra margin around the court bbox in feet (same units as ``Court(..., units="ft")``).
+COURT_PAD_FT = 2.0
+
+
+class _SuppressMatplotlibAspectDataLimitLogFilter(logging.Filter):
+    """Drop Matplotlib's warning when ``adjustable='datalim'`` tweaks fixed limits."""
+
+    _needle = "fulfill fixed data aspect with adjustable data limits"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return self._needle not in record.getMessage()
+
+
+@contextmanager
+def _suppress_matplotlib_fixed_limit_aspect_log():
+    """Context for ``set_aspect(..., adjustable='datalim')`` + ``canvas.draw()``."""
+    log = logging.getLogger("matplotlib.axes._base")
+    flt = _SuppressMatplotlibAspectDataLimitLogFilter()
+    log.addFilter(flt)
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Ignoring fixed [xy] limits to fulfill fixed data aspect.*",
+                category=UserWarning,
+            )
+            yield
+    finally:
+        log.removeFilter(flt)
+
 
 nba_court_parameters = {
     "court_dims": [94.0, 50.0],
@@ -1767,6 +1801,19 @@ def render_basketball_observed_gt_panel(
     return rgb
 
 
+def _tighten_basketball_figure_for_export(fig, ax) -> None:
+    """Fill the figure with the court (no default subplot gutters).
+
+    ``Court.draw`` uses ``set_aspect('equal')`` with the default ``adjustable='box'``,
+    which shrinks the axes inside the figure—``buffer_rgba()`` then shows large white
+    margins. We use ``adjustable='datalim'`` so limits expand slightly to fill the
+    axes while keeping equal x/y scale, and remove subplot margins.
+    """
+    ax.margins(0)
+    fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+    ax.set_aspect("equal", adjustable="datalim")
+
+
 def create_basketball_frame(
     trajectory: np.ndarray,
     frame_idx: int,
@@ -1774,6 +1821,8 @@ def create_basketball_frame(
     history: int = 5,
     trace_lw: float = 3.5,
     ball_trace: bool = True,
+    dpi: int = 32,
+    court_pad_ft: float = COURT_PAD_FT,
 ) -> np.ndarray:
     """
     Render one basketball court frame with a short motion trace per entity.
@@ -1785,6 +1834,9 @@ def create_basketball_frame(
 
     If ``ball_trace`` is False, players keep traces but the ball is drawn only at
     its current position (no motion history for the ball).
+
+    ``dpi`` sets the Matplotlib figure DPI (frame pixel size for fixed figsize).
+    ``court_pad_ft`` is padding in feet passed to ``Court.draw(..., pad=...)``.
     """
     traj = np.asarray(trajectory, dtype=float)
     if traj.ndim != 3 or traj.shape[-1] != 2:
@@ -1794,9 +1846,9 @@ def create_basketball_frame(
         raise ValueError(f"frame_idx {frame_idx} out of range for T={t_len}")
     hist_n = max(1, int(history))
 
-    fig, ax = plt.subplots(1, 1, figsize=(7.5, 4), dpi=32)
+    fig, ax = plt.subplots(1, 1, figsize=(7.5, 4), dpi=dpi)
     court = Court(court_type="nba", origin="bottom-left", units="ft")
-    court.draw(ax=ax, showaxis=False)
+    court.draw(ax=ax, showaxis=False, pad=court_pad_ft)
 
     def _trace_entity(entity_idx: int, color: tuple, z: int) -> None:
         if entity_idx < 0 or entity_idx >= n_ent:
@@ -1848,7 +1900,9 @@ def create_basketball_frame(
         else:
             _ball_current_only(i, COLOR_BALL, z=5)
 
-    fig.canvas.draw()  # ensure the renderer has drawn
+    with _suppress_matplotlib_fixed_limit_aspect_log():
+        _tighten_basketball_figure_for_export(fig, ax)
+        fig.canvas.draw()  # ensure the renderer has drawn; may call apply_aspect
     w, h = fig.canvas.get_width_height()
     # Prefer buffer_rgba if available
     if hasattr(fig.canvas, "buffer_rgba"):
@@ -1924,6 +1978,8 @@ def create_frames_from_trajectory(
     game: str,
     *,
     basketball_ball_trace: bool = False,
+    dpi: int = 32,
+    court_pad_ft: float = COURT_PAD_FT,
 ) -> list[np.ndarray]:
     """
     create frames from a trajectory
@@ -1931,13 +1987,22 @@ def create_frames_from_trajectory(
     For basketball, ``basketball_ball_trace`` controls whether the ball (indices
     ``>= 10``) gets a short motion trace; when False, only the current ball
     position is drawn (players still get traces).
+
+    ``dpi`` is passed through to basketball frame rendering (Matplotlib figure DPI).
+    ``court_pad_ft`` is passed through as feet of padding around the court bbox.
     """
     frames = []
     traj = np.asarray(trajectory)
     if game == "basketball":
         for t in range(traj.shape[0]):
             frames.append(
-                create_basketball_frame(traj, t, ball_trace=basketball_ball_trace)
+                create_basketball_frame(
+                    traj,
+                    t,
+                    ball_trace=basketball_ball_trace,
+                    dpi=dpi,
+                    court_pad_ft=court_pad_ft,
+                )
             )
         return frames
     for pts in trajectory:
@@ -2079,13 +2144,18 @@ def render_scene_to_rgb(
     figsize=(7.5, 4),
     dpi: int = 32,
     showaxis: bool = False,
+    court_pad_ft: float = COURT_PAD_FT,
 ) -> np.ndarray:
     """Render one frame as uint8 HxWx3 (court + trajectories), for video export."""
     fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
     court = Court(court_type=court_type, origin=origin, units=units)
-    court.draw(ax=ax, orientation=orientation, showaxis=showaxis)
+    court.draw(
+        ax=ax, orientation=orientation, showaxis=showaxis, pad=court_pad_ft
+    )
     draw_trajectories_on_court(ax, data, obs_len=obs_len)
-    fig.canvas.draw()
+    with _suppress_matplotlib_fixed_limit_aspect_log():
+        _tighten_basketball_figure_for_export(fig, ax)
+        fig.canvas.draw()
     if hasattr(fig.canvas, "buffer_rgba"):
         rgba = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)
     elif hasattr(fig.canvas, "tostring_argb"):
