@@ -22,7 +22,6 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import sample_trajectory_ddpm as sd  # noqa: E402
-
 from src.inference.trajectory_sample import (  # noqa: E402
     ground_truth_normalized_filling,
     model_name,
@@ -37,22 +36,18 @@ from src.utils.trajectory_metrics import (  # noqa: E402
 )
 from train import _build_datamodule, _build_module  # noqa: E402
 
-_DATA_PRESETS = tuple(
-    sorted(p.stem for p in (_REPO_ROOT / "configs" / "data").glob("*.yaml"))
-)
+_DATA_PRESETS = tuple(sorted(p.stem for p in (_REPO_ROOT / "configs" / "data").glob("*.yaml")))
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="ADE/FDE/JADE/JFDE on validation data from a checkpoint (court units).",
     )
-    p.add_argument(
-        "--checkpoint", type=str, required=True, help="Lightning .ckpt path."
-    )
+    p.add_argument("--checkpoint", type=str, required=True, help="Lightning .ckpt path.")
     p.add_argument(
         "--data",
         type=str,
-        default=None,
+        default="trajectory_nba_filling_test",
         choices=list(_DATA_PRESETS) if _DATA_PRESETS else None,
         help="Override configs/data/<name>.yaml (default: checkpoint config.yaml data).",
     )
@@ -65,7 +60,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--horizon-stride",
         type=int,
-        default=20,
+        default=5,
         help="Cumulative horizon stride for metric keys (default: 20).",
     )
     p.add_argument(
@@ -193,9 +188,7 @@ def main() -> None:
 
     mname = model_name(cfg)
     if mname != "trajectory_filling_ddpm":
-        raise ValueError(
-            f"Unsupported model.name: {mname!r}; expected 'trajectory_filling_ddpm'"
-        )
+        raise ValueError(f"Unsupported model.name: {mname!r}; expected 'trajectory_filling_ddpm'")
     datamodule = _build_datamodule(cfg.data)
     datamodule.setup("validate")
     val_loader = datamodule.val_dataloader()
@@ -220,18 +213,14 @@ def main() -> None:
             if remain <= 0:
                 break
             if remain < bs:
-                batch = {
-                    k: v[:remain] if torch.is_tensor(v) else v for k, v in batch.items()
-                }
+                batch = {k: v[:remain] if torch.is_tensor(v) else v for k, v in batch.items()}
                 bs = remain
 
         gt_n = ground_truth_normalized_filling(module, batch)
         t_g = int(gt_n.shape[1])
         ts = int(args.metrics_start_t)
         if ts < 0 or ts >= t_g:
-            raise ValueError(
-                f"--metrics-start-t must satisfy 0 <= t < T; got t={ts}, T={t_g}."
-            )
+            raise ValueError(f"--metrics-start-t must satisfy 0 <= t < T; got t={ts}, T={t_g}.")
 
         mode = str(args.prediction_mode).strip().lower()
         if mode not in ("blended", "pure"):
@@ -251,9 +240,7 @@ def main() -> None:
         )
         t_s = int(samples_norm.shape[2])
         if t_s != t_g:
-            raise ValueError(
-                f"Prediction length T={t_s} != ground-truth T={t_g} for task {mname}."
-            )
+            raise ValueError(f"Prediction length T={t_s} != ground-truth T={t_g} for task {mname}.")
         if ts > 0:
             samples_norm = samples_norm[:, :, ts:, :, :]
         gt_slice = gt_n[:, ts:, :, :] if ts > 0 else gt_n
