@@ -27,7 +27,11 @@ def normal_kl(
     assert tensor is not None, "at least one argument must be a Tensor"
 
     logvar1_t, logvar2_t = [
-        x if isinstance(x, torch.Tensor) else torch.tensor(x, device=tensor.device, dtype=tensor.dtype)
+        (
+            x
+            if isinstance(x, torch.Tensor)
+            else torch.tensor(x, device=tensor.device, dtype=tensor.dtype)
+        )
         for x in (logvar1, logvar2)
     ]
 
@@ -71,4 +75,21 @@ def discretized_gaussian_log_likelihood(
         ),
     )
     assert log_probs.shape == x.shape
+    return log_probs
+
+
+def continuous_gaussian_log_likelihood(x, *, means, log_scales):
+    """
+    Compute the log-likelihood of a continuous Gaussian distribution.
+    :param x: the targets
+    :param means: the Gaussian mean Tensor.
+    :param log_scales: the Gaussian log stddev Tensor.
+    :return: a tensor like x of log probabilities (in nats).
+    """
+    centered_x = x - means
+    inv_stdv = torch.exp(-log_scales)
+    normalized_x = centered_x * inv_stdv
+    log_probs = torch.distributions.Normal(torch.zeros_like(x), torch.ones_like(x)).log_prob(
+        normalized_x
+    )
     return log_probs

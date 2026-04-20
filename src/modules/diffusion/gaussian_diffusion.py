@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from src.modules.diffusion.diffusion_utils import (
+    continuous_gaussian_log_likelihood,
     discretized_gaussian_log_likelihood,
     mean_flat,
     normal_kl,
@@ -97,7 +98,6 @@ class ModelVarType(enum.Enum):
     LEARNED = enum.auto()
     FIXED_SMALL = enum.auto()
     FIXED_LARGE = enum.auto()
-    LEARNED_RANGE = enum.auto()
 
 
 class LossType(enum.Enum):
@@ -108,6 +108,13 @@ class LossType(enum.Enum):
 
     def is_vb(self) -> bool:
         return self == LossType.KL or self == LossType.RESCALED_KL
+
+
+class VbDecoderNllType(enum.Enum):
+    """Decoder NLL at t=0 inside the VB / bpd term."""
+
+    CONTINUOUS = enum.auto()
+    DISCRETIZED = enum.auto()
 
 
 def _mean_loss(
@@ -139,6 +146,7 @@ class GaussianDiffusion(nn.Module):
         loss_type: LossType = LossType.MSE,
         clip_denoised: bool = False,
         coord_channels: int = 2,
+        vb_decoder_nll: VbDecoderNllType = VbDecoderNllType.CONTINUOUS,
     ) -> None:
         super().__init__()
         self.legacy_posterior_log_variance = bool(legacy_posterior_log_variance)
@@ -147,6 +155,7 @@ class GaussianDiffusion(nn.Module):
         self.loss_type = loss_type
         self.clip_denoised = bool(clip_denoised)
         self.coord_channels = int(coord_channels)
+        self.vb_decoder_nll = vb_decoder_nll
 
         betas_np = make_beta_schedule(
             beta_schedule,
@@ -380,7 +389,7 @@ class GaussianDiffusion(nn.Module):
         model_output = model(x, t, **model_kwargs)
         c = self.coord_channels
 
-        if self.model_var_type in (ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE):
+        if self.model_var_type == ModelVarType.LEARNED:
             assert (
                 model_output.shape[-1] == c * 2
             ), f"learned variance expects last dim {c*2}, got {model_output.shape[-1]}"
@@ -586,11 +595,18 @@ class GaussianDiffusion(nn.Module):
         log_scales = 0.5 * out["log_variance"]
         if log_scales.shape != x_start.shape:
             log_scales = log_scales.expand_as(x_start)
-        decoder_nll = -discretized_gaussian_log_likelihood(
-            x_start,
-            means=out["mean"],
-            log_scales=log_scales,
-        )
+        if self.vb_decoder_nll == VbDecoderNllType.CONTINUOUS:
+            decoder_nll = -continuous_gaussian_log_likelihood(
+                x_start,
+                means=out["mean"],
+                log_scales=log_scales,
+            )
+        else:
+            decoder_nll = -discretized_gaussian_log_likelihood(
+                x_start,
+                means=out["mean"],
+                log_scales=log_scales,
+            )
         decoder_nll = mean_flat(decoder_nll) / np.log(2.0)
 
         output = torch.where((t == 0), decoder_nll, kl)
@@ -631,7 +647,7 @@ class GaussianDiffusion(nn.Module):
         model_output = model(x_t, t, **model_kwargs)
         c = self.coord_channels
 
-        if self.model_var_type in (ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE):
+        if self.model_var_type == ModelVarType.LEARNED:
             assert model_output.shape[-1] == c * 2
             model_out_mean, model_var_values = torch.split(model_output, c, dim=-1)
             frozen_out = torch.cat([model_out_mean.detach(), model_var_values], dim=-1)
@@ -710,7 +726,6 @@ def parse_model_var_type(s: str) -> ModelVarType:
         "fixed_small": ModelVarType.FIXED_SMALL,
         "fixed_large": ModelVarType.FIXED_LARGE,
         "learned": ModelVarType.LEARNED,
-        "learned_range": ModelVarType.LEARNED_RANGE,
     }
     if key not in mapping:
         raise ValueError(f"Unknown model_var_type: {s!r}")
@@ -727,4 +742,15 @@ def parse_loss_type(s: str) -> LossType:
     }
     if key not in mapping:
         raise ValueError(f"Unknown diffusion loss_type: {s!r}")
+    return mapping[key]
+
+
+def parse_vb_decoder_nll_type(s: str) -> VbDecoderNllType:
+    key = str(s).lower().strip()
+    mapping = {
+        "continuous": VbDecoderNllType.CONTINUOUS,
+        "discretized": VbDecoderNllType.DISCRETIZED,
+    }
+    if key not in mapping:
+        raise ValueError(f"Unknown vb_decoder_nll: {s!r} (expected continuous|discretized)")
     return mapping[key]

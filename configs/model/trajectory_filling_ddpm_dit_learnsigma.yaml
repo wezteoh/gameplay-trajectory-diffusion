@@ -23,7 +23,9 @@ loss_type: l2
 diffusion_loss_type: rescaled_mse
 # Ignored when variance is learned (vb is already in the loss); kept for consistency.
 log_diagnostic_vb: true
-model_var_type: learned_range
+# t=0 decoder NLL for VB term: continuous (real-valued trajectories) or discretized (DDPM image-style).
+vb_decoder_nll: continuous
+model_var_type: learned
 clip_denoised: false
 legacy_posterior_log_variance: false
 

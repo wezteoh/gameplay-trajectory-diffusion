@@ -19,6 +19,7 @@ from src.modules.diffusion.gaussian_diffusion import (
     parse_loss_type,
     parse_model_mean_type,
     parse_model_var_type,
+    parse_vb_decoder_nll_type,
 )
 from src.modules.models.ddpm import TrajectoryDDPMModel
 
@@ -128,6 +129,9 @@ def _build_module(cfg: DictConfig) -> pl.LightningModule:
         ),
         clip_denoised=bool(OmegaConf.select(model_cfg, "clip_denoised", default=False)),
         coord_channels=int(data_cfg.coord_dim),
+        vb_decoder_nll=parse_vb_decoder_nll_type(
+            str(OmegaConf.select(model_cfg, "vb_decoder_nll", default="continuous"))
+        ),
     )
     ddpm_model = TrajectoryDDPMModel(
         backbone=backbone,
