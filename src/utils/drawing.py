@@ -2020,7 +2020,10 @@ def create_video_from_frames(frames: list[np.ndarray], video_path: str, fps: int
     """
     create a video from a list of frames
     """
-    mimsave(video_path, frames, fps=fps)
+    if video_path.lower().endswith(".gif"):
+        mimsave(video_path, frames, fps=fps, loop=0)
+    else:
+        mimsave(video_path, frames, fps=fps)
 
 
 def frames_to_tb_video_tensor(frames: list[np.ndarray]) -> torch.Tensor:

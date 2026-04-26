@@ -104,12 +104,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--save-videos",
         action="store_true",
-        help="Also write trajectory_*.mp4 court visualizations.",
+        help="Also write trajectory_*.gif court visualizations.",
     )
     p.add_argument(
         "--save-evolution-videos",
         action="store_true",
-        help=("Also write evolution_*.mp4 showing denoising checkpoints for each sample."),
+        help=("Also write evolution_*.gif showing denoising checkpoints for each sample."),
     )
     p.add_argument(
         "--evolution-steps",
@@ -142,7 +142,7 @@ def _parse_args() -> argparse.Namespace:
         default=96,
         help=(
             "Matplotlib figure DPI for all court renders from this script: "
-            "trajectory MP4s, blend MP4s, evolution MP4s, and evolution PNGs "
+            "trajectory GIFs, blend GIFs, evolution GIFs, and evolution PNGs "
             "(default: 96)."
         ),
     )
@@ -150,14 +150,14 @@ def _parse_args() -> argparse.Namespace:
         "--filling-blend-videos",
         action="store_true",
         help=(
-            "Also write trajectory_*_blend.mp4 (GT at observed steps + predicted "
+            "Also write trajectory_*_blend.gif (GT at observed steps + predicted "
             "deltas elsewhere), like validation."
         ),
     )
     p.add_argument(
         "--guidance-scale",
         type=float,
-        default=None,
+        default=1.0,
         help=(
             "Override classifier-free guidance scale. "
             "If omitted, uses value from checkpoint config."
@@ -662,17 +662,13 @@ def _save_sample_results(
     if args.save_videos:
         for i in range(n):
             court_xy = denormalize_court_xy_numpy(x_np[i], court_w, court_h)
-            frames = create_frames_from_trajectory(
-                court_xy, "basketball", dpi=court_dpi
-            )
-            video_path = os.path.join(out_dir, f"trajectory_{i:04d}.mp4")
+            frames = create_frames_from_trajectory(court_xy, "basketball", dpi=court_dpi)
+            video_path = os.path.join(out_dir, f"trajectory_{i:04d}.gif")
             create_video_from_frames(frames, video_path, fps=10)
             if blend_np is not None and args.filling_blend_videos:
                 court_b = denormalize_court_xy_numpy(blend_np[i], court_w, court_h)
-                frames_b = create_frames_from_trajectory(
-                    court_b, "basketball", dpi=court_dpi
-                )
-                blend_path = os.path.join(out_dir, f"trajectory_{i:04d}_blend.mp4")
+                frames_b = create_frames_from_trajectory(court_b, "basketball", dpi=court_dpi)
+                blend_path = os.path.join(out_dir, f"trajectory_{i:04d}_blend.gif")
                 create_video_from_frames(frames_b, blend_path, fps=10)
 
     want_evo_traces = bool(args.save_evolution_videos or args.save_evolution_images)
@@ -700,7 +696,7 @@ def _save_sample_results(
                         if step_frames:
                             evo_path = os.path.join(
                                 out_dir,
-                                f"evolution_{i:04d}_step_{int(step):04d}.mp4",
+                                f"evolution_{i:04d}_step_{int(step):04d}.gif",
                             )
                             create_video_from_frames(step_frames, evo_path, fps=evo_fps)
                     if args.save_evolution_images:
@@ -762,13 +758,8 @@ def main() -> None:
     if args.save_evolution_videos and evo_fps <= 0:
         raise ValueError("--evolution-fps must be > 0 when --save-evolution-videos is set.")
     court_dpi = int(args.evolution_image_dpi)
-    if (
-        court_dpi < 1
-        and (
-            args.save_videos
-            or args.save_evolution_videos
-            or args.save_evolution_images
-        )
+    if court_dpi < 1 and (
+        args.save_videos or args.save_evolution_videos or args.save_evolution_images
     ):
         raise ValueError(
             "--evolution-image-dpi must be >= 1 when saving videos or evolution images."

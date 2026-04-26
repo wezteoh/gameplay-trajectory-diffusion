@@ -22,6 +22,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import sample_trajectory_ddpm as sd  # noqa: E402
+
 from src.inference.trajectory_sample import (  # noqa: E402
     ground_truth_normalized_filling,
     model_name,
@@ -95,7 +96,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--guidance-scale",
         type=float,
-        default=None,
+        default=1.0,
         help="Override classifier-free guidance scale (filling).",
     )
     p.add_argument(

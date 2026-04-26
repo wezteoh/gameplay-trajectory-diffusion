@@ -1,0 +1,42 @@
+name: trajectory_nba_filling
+
+# Must match shapes in .npy: (N, T, 11, 2); DDPM runs on T deltas (first delta is 0)
+full_seq_len: 30
+delta_len: 30
+num_agents: 11
+coord_dim: 2
+court_width: 94.0
+court_height: 50.0
+
+params:
+  train_batch_size: 128
+  val_batch_size: 512
+  full_seq_len: ${..full_seq_len}
+  num_agents: ${..num_agents}
+  coord_dim: ${..coord_dim}
+  court_width: ${..court_width}
+  court_height: ${..court_height}
+  train_path: data/nba_train.npy
+  val_path: data/nba_test.npy
+  trajectory_key: trajectory
+  context_key: context
+  mask_key: obs_mask
+  position_0_key: position_0
+  context_fill: [-4.0, -4.0]
+  # When include_delta_in_context is true, context is [XY(2), norm_delta(2)]; masked
+  # delta slots use delta_context_fill (normalized delta space).
+  include_delta_in_context: true
+  delta_context_fill: [0.0, 0.0]
+  delta_shift: [0.0, 0.0]
+  delta_scale: [1.0, 1.0]
+  # Train-time mask mixture; optional val_mask_path: .npy [N_val, T, A] float/bool
+  masking:
+    train:
+      mixture:
+        - weight: 1.0
+          even:
+            mode: fixed
+            visible_prefix_len: 10
+    val_mask_path: null
+  num_workers: 0
+  max_val_samples: 5120
