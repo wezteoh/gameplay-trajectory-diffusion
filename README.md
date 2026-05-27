@@ -57,9 +57,11 @@ python scripts/sample_trajectory_ddpm.py \
 
 You can create your own conditioning sketches via this [app](https://github.com/wezteoh/gameplay-trajectory-canvas). To condition on your own sketches, pass `--input-dir <dir>` where each immediate subdirectory contains a `traj.npy` (court XY, shape `(T, A, 2)`) and a `mask.npy` (shape `(T, A)`); outputs are written under `tmp/<output-subdir>/<subdir>/`.
 
+
+## Pretrained models
+A model pretrained on SportVU NBA dataset: [https://huggingface.co/wezteoh/traj-diffusion](https://huggingface.co/wezteoh/traj-diffusion) 
+
 ## Acknowledgments
 
 The trajectory datasets used in this project are kindly open-sourced by [MediaBrain-SJTU/LED](https://github.com/MediaBrain-SJTU/LED).
 Implementation details in `src/modules/diffusion/gaussian_diffusion.py` and `src/modules/diffusion/diffusion_utils.py` heavily reference [facebookresearch/DiT](https://github.com/facebookresearch/DiT).
-
-Pretrained checkpoint: Hugging Face — link coming soon.
